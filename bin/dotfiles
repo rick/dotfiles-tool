@@ -212,27 +212,45 @@ secrets_repo() {
 
   info "rendering secrets for $REPO_ID"
 
-  need_cmd op
   need_cmd rsync
-  op whoami >/dev/null 2>&1 ||
-    die "1Password CLI is not signed in. Run: op signin"
+
+  # Templates with no secret references are copied verbatim. `op inject` wants
+  # an account even when it has nothing to resolve, and there is no reason to
+  # make a repo that has not started using secrets yet sign in to 1Password.
+  # The grep deliberately does not try to tell code from comments.
+  local use_op=0
+  if grep -rqI 'op://' "$TEMPLATES_PATH" 2>/dev/null; then
+    use_op=1
+    need_cmd op
+    op whoami >/dev/null 2>&1 ||
+      die "1Password CLI is not signed in. Run: op signin"
+  else
+    debug "no op:// references under $TEMPLATES_PATH; copying templates verbatim"
+  fi
 
   local dest="$SECRETS_PATH/$SECRETS_PACKAGE"
   local tmp
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-inject.XXXXXX")"
   TMPDIRS="$TMPDIRS $tmp"
 
-  local failed=0 count=0 tpl rel out
+  local failed=0 count=0 ok tpl rel out
   while IFS= read -r -d '' tpl; do
-    rel="${tpl#$TEMPLATES_PATH/}"
+    rel="${tpl#"$TEMPLATES_PATH/"}"
     out="$tmp/${rel%.tmpl}"
     mkdir -p "$(dirname "$out")"
 
-    # hostname and OP_VAULT are exported for the template's benefit: secret
-    # references may interpolate them, which keeps one template usable across
-    # machines and vaults.
-    if hostname="$HOST" OP_VAULT="$OP_VAULT" DOTFILES_HOST="$HOST" \
-         op inject --in-file "$tpl" --out-file "$out" >/dev/null; then
+    ok=1
+    if [ "$use_op" -eq 1 ]; then
+      # hostname and OP_VAULT are exported for the template's benefit: secret
+      # references may interpolate them, which keeps one template usable
+      # across machines and vaults.
+      hostname="$HOST" OP_VAULT="$OP_VAULT" DOTFILES_HOST="$HOST" \
+        op inject --in-file "$tpl" --out-file "$out" >/dev/null || ok=0
+    else
+      cp "$tpl" "$out" || ok=0
+    fi
+
+    if [ "$ok" -eq 1 ]; then
       chmod 600 "$out"
       count=$((count + 1))
       step "$rel"
@@ -347,12 +365,12 @@ DOCTOR_INSTALL=0
 check_cmd() {
   local cmd="$1" kind="$2" pkg="$3"
   if command -v "$cmd" >/dev/null 2>&1; then
-    printf '  %s ok%s      %-16s %s\n' "$C_GREEN" "$C_RESET" "$cmd" "$(command -v "$cmd")"
+    printf '  %s%-6s%s %-16s %s\n' "$C_GREEN" ok "$C_RESET" "$cmd" "$(command -v "$cmd")"
     return 0
   fi
 
   if [ "$DOCTOR_INSTALL" -eq 1 ] && command -v brew >/dev/null 2>&1; then
-    printf '  %s..%s      %-16s installing via brew\n' "$C_YELLOW" "$C_RESET" "$cmd"
+    printf '  %s%-6s%s %-16s installing via brew\n' "$C_YELLOW" ".." "$C_RESET" "$cmd"
     if [ "$kind" = cask ]; then
       brew install --cask "$pkg"
     else
@@ -362,9 +380,9 @@ check_cmd() {
   fi
 
   if [ "$kind" = cask ]; then
-    printf '  %smiss%s    %-16s brew install --cask %s\n' "$C_RED" "$C_RESET" "$cmd" "$pkg"
+    printf '  %s%-6s%s %-16s brew install --cask %s\n' "$C_RED" miss "$C_RESET" "$cmd" "$pkg"
   else
-    printf '  %smiss%s    %-16s brew install %s\n' "$C_RED" "$C_RESET" "$cmd" "$pkg"
+    printf '  %s%-6s%s %-16s brew install %s\n' "$C_RED" miss "$C_RESET" "$cmd" "$pkg"
   fi
   return 1
 }
@@ -381,34 +399,34 @@ cmd_doctor() {
   info "1Password"
   if command -v op >/dev/null 2>&1; then
     if op whoami >/dev/null 2>&1; then
-      printf '  %s ok%s      signed in as %s\n' "$C_GREEN" "$C_RESET" "$(op whoami --format json 2>/dev/null | sed -n 's/.*"email": *"\([^"]*\)".*/\1/p' | head -1)"
+      printf '  %s%-6s%s signed in as %s\n' "$C_GREEN" ok "$C_RESET" "$(op whoami --format json 2>/dev/null | sed -n 's/.*"email": *"\([^"]*\)".*/\1/p' | head -1)"
     else
-      printf '  %smiss%s    not signed in; run: op signin\n' "$C_RED" "$C_RESET"
+      printf '  %s%-6s%s not signed in; run: op signin\n' "$C_RED" miss "$C_RESET"
       rc=1
     fi
   fi
 
   info "config"
   if [ -f "$CONFIG_FILE" ] || [ -n "${DOTFILES_REPOS:-}" ]; then
-    printf '  %s ok%s      %s\n' "$C_GREEN" "$C_RESET" "$CONFIG_FILE"
+    printf '  %s%-6s%s %s\n' "$C_GREEN" ok "$C_RESET" "$CONFIG_FILE"
     local repo
     while IFS= read -r repo; do
       [ -n "$repo" ] || continue
       if [ -d "$repo" ]; then
         if [ -f "$repo/dotfiles.conf" ]; then
-          printf '  %s ok%s      %s\n' "$C_GREEN" "$C_RESET" "$repo"
+          printf '  %s%-6s%s %s\n' "$C_GREEN" ok "$C_RESET" "$repo"
         else
-          printf '  %swarn%s    %s (no dotfiles.conf)\n' "$C_YELLOW" "$C_RESET" "$repo"
+          printf '  %s%-6s%s %s (no dotfiles.conf)\n' "$C_YELLOW" warn "$C_RESET" "$repo"
         fi
       else
-        printf '  %smiss%s    %s (not found)\n' "$C_RED" "$C_RESET" "$repo"
+        printf '  %s%-6s%s %s (not found)\n' "$C_RED" miss "$C_RESET" "$repo"
         rc=1
       fi
     done <<EOF
 $(repo_list 2>/dev/null || true)
 EOF
   else
-    printf '  %smiss%s    %s does not exist\n' "$C_RED" "$C_RESET" "$CONFIG_FILE"
+    printf '  %s%-6s%s %s does not exist\n' "$C_RED" miss "$C_RESET" "$CONFIG_FILE"
     rc=1
   fi
 
