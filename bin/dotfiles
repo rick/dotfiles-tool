@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+#
+# dotfiles -- link config repos into $HOME with GNU stow, filling in secrets
+#             from 1Password templates along the way.
+#
+# This program carries no configuration of its own. It reads a list of config
+# repos from ~/.config/dotfiles/config, and each repo describes itself in a
+# dotfiles.conf at its root. See README.md.
+#
+# Written for bash 3.2 so it runs against /bin/bash on stock macOS.
+
+set -euo pipefail
+
+PROGRAM="${0##*/}"
+VERSION="0.1.0"
+
+: "${XDG_CONFIG_HOME:=$HOME/.config}"
+: "${XDG_DATA_HOME:=$HOME/.local/share}"
+
+CONFIG_FILE="${DOTFILES_CONFIG:-$XDG_CONFIG_HOME/dotfiles/config}"
+STATE_DIR="${DOTFILES_STATE:-$XDG_DATA_HOME/dotfiles}"
+HOST="$(hostname -s)"
+
+DRY_RUN=0
+ADOPT=0
+VERBOSE=0
+TMPDIRS=""
+
+# ---------------------------------------------------------------- output ----
+
+if [ -t 1 ]; then
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""
+fi
+
+info()  { printf '%s==>%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+step()  { printf '  %s->%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
+warn()  { printf '%swarning:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+die()   { printf '%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+debug() { [ "$VERBOSE" -eq 1 ] && printf '     %s%s%s\n' "$C_DIM" "$*" "$C_RESET" || true; }
+
+cleanup() {
+  local d
+  for d in $TMPDIRS; do
+    [ -n "$d" ] && [ -d "$d" ] && rm -rf "$d"
+  done
+}
+trap cleanup EXIT
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is not installed. Run: $PROGRAM doctor --install"
+}
+
+# ------------------------------------------------------------ repo config ----
+
+# Emit one config repo path per line. DOTFILES_REPOS (colon-separated)
+# overrides the config file, which is handy for testing.
+repo_list() {
+  if [ -n "${DOTFILES_REPOS:-}" ]; then
+    printf '%s' "$DOTFILES_REPOS" | tr ':' '\n'
+    return 0
+  fi
+
+  [ -f "$CONFIG_FILE" ] || die "no config repos configured; expected $CONFIG_FILE
+Create it with one config repo path per line, e.g.:
+
+    mkdir -p $(dirname "$CONFIG_FILE")
+    echo ~/git/dotfiles-work > $CONFIG_FILE"
+
+  sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' "$CONFIG_FILE" |
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        '~/'*) line="$HOME/${line#\~/}" ;;
+      esac
+      printf '%s\n' "$line"
+    done
+}
+
+# Load one repo's dotfiles.conf, resetting every setting to its default first
+# so nothing leaks between repos. Sets the REPO_* globals used by the commands.
+load_repo() {
+  REPO="$1"
+  [ -d "$REPO" ] || die "config repo does not exist: $REPO"
+
+  REPO_ID="$(basename "$REPO")"
+  PACKAGES=()
+  OP_VAULT=""
+  PACKAGES_DIR="packages"
+  TEMPLATES_DIR="templates"
+  SECRETS_PACKAGE="private"
+  TARGET="$HOME"
+
+  if [ -f "$REPO/dotfiles.conf" ]; then
+    # dotfiles.conf is sourced, so a repo can branch on $HOST, $(uname), etc.
+    # shellcheck disable=SC1090,SC1091
+    . "$REPO/dotfiles.conf"
+  else
+    warn "$REPO has no dotfiles.conf; using defaults"
+  fi
+
+  PACKAGES_PATH="$REPO/$PACKAGES_DIR"
+  TEMPLATES_PATH="$REPO/$TEMPLATES_DIR"
+  SECRETS_PATH="$STATE_DIR/$REPO_ID"
+
+  # An unset PACKAGES means "everything under packages/".
+  if [ ${#PACKAGES[@]} -eq 0 ] && [ -d "$PACKAGES_PATH" ]; then
+    local d
+    for d in "$PACKAGES_PATH"/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"
+      PACKAGES[${#PACKAGES[@]}]="${d##*/}"
+    done
+  fi
+}
+
+# Run a function once per configured repo, with that repo's config loaded.
+for_each_repo() {
+  local fn="$1"
+  local repo
+  local found=0
+  local repos
+  repos="$(repo_list)"
+
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    found=1
+    load_repo "$repo"
+    "$fn"
+  done <<EOF
+$repos
+EOF
+
+  [ "$found" -eq 1 ] || die "no config repos configured in $CONFIG_FILE"
+}
+
+# --------------------------------------------------------------- stowing ----
+
+# Build the stow flags shared by link and unlink. --no-folding keeps stow from
+# symlinking whole directories, so several repos can contribute files to the
+# same directory (~/.bash.d, ~/bin) without colliding.
+stow_flags() {
+  printf '%s\n' --no-folding
+  [ "$DRY_RUN" -eq 1 ] && printf '%s\n' --simulate --verbose
+  [ "$VERBOSE" -eq 1 ] && printf '%s\n' --verbose
+  [ "$ADOPT" -eq 1 ] && printf '%s\n' --adopt
+  return 0
+}
+
+run_stow() {
+  local dir="$1" action="$2"
+  shift 2
+  local flags=()
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] && flags[${#flags[@]}]="$f"
+  done <<EOF
+$(stow_flags)
+EOF
+
+  stow --dir "$dir" --target "$TARGET" "$action" "${flags[@]}" "$@"
+}
+
+link_repo() {
+  info "linking $REPO_ID ($REPO)"
+
+  if [ ${#PACKAGES[@]} -eq 0 ]; then
+    warn "no packages to link for $REPO_ID"
+  else
+    local pkg
+    for pkg in "${PACKAGES[@]}"; do
+      [ -d "$PACKAGES_PATH/$pkg" ] ||
+        die "package '$pkg' listed in $REPO/dotfiles.conf but $PACKAGES_PATH/$pkg does not exist"
+    done
+    step "packages: ${PACKAGES[*]}"
+    run_stow "$PACKAGES_PATH" --stow "${PACKAGES[@]}"
+  fi
+
+  if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
+    step "secrets: $SECRETS_PATH/$SECRETS_PACKAGE"
+    run_stow "$SECRETS_PATH" --stow "$SECRETS_PACKAGE"
+  elif [ -d "$TEMPLATES_PATH" ]; then
+    warn "$REPO_ID has templates but no generated secrets yet; run: $PROGRAM secrets"
+  fi
+}
+
+unlink_repo() {
+  info "unlinking $REPO_ID ($REPO)"
+
+  if [ ${#PACKAGES[@]} -gt 0 ]; then
+    run_stow "$PACKAGES_PATH" --delete "${PACKAGES[@]}"
+  fi
+
+  if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
+    run_stow "$SECRETS_PATH" --delete "$SECRETS_PACKAGE"
+  fi
+}
+
+# --------------------------------------------------------------- secrets ----
+
+# Render every file under templates/ through `op inject` into a scratch dir,
+# and only swap it into place once all of them succeeded. A half-rendered tree
+# must never reach the state dir: stow symlinks point at it, and a partial
+# swap would leave those links dangling.
+secrets_repo() {
+  if [ ! -d "$TEMPLATES_PATH" ]; then
+    debug "$REPO_ID has no $TEMPLATES_DIR/, skipping"
+    return 0
+  fi
+
+  info "rendering secrets for $REPO_ID"
+
+  need_cmd op
+  need_cmd rsync
+  op whoami >/dev/null 2>&1 ||
+    die "1Password CLI is not signed in. Run: op signin"
+
+  local dest="$SECRETS_PATH/$SECRETS_PACKAGE"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-inject.XXXXXX")"
+  TMPDIRS="$TMPDIRS $tmp"
+
+  local failed=0 count=0 tpl rel out
+  while IFS= read -r -d '' tpl; do
+    rel="${tpl#$TEMPLATES_PATH/}"
+    out="$tmp/${rel%.tmpl}"
+    mkdir -p "$(dirname "$out")"
+
+    # hostname and OP_VAULT are exported for the template's benefit: secret
+    # references may interpolate them, which keeps one template usable across
+    # machines and vaults.
+    if hostname="$HOST" OP_VAULT="$OP_VAULT" DOTFILES_HOST="$HOST" \
+         op inject --in-file "$tpl" --out-file "$out" >/dev/null; then
+      chmod 600 "$out"
+      count=$((count + 1))
+      step "$rel"
+    else
+      warn "could not render $rel"
+      failed=1
+    fi
+  done < <(find "$TEMPLATES_PATH" -type f ! -name '.DS_Store' -print0)
+
+  if [ "$failed" -ne 0 ]; then
+    die "one or more templates failed to render; left $dest untouched"
+  fi
+
+  if [ "$count" -eq 0 ]; then
+    warn "no templates found under $TEMPLATES_PATH"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "would install $count rendered file(s) into $dest"
+    return 0
+  fi
+
+  mkdir -p "$dest"
+  # --delete rather than rm -rf: files are replaced in place, so there is no
+  # window where the tree is missing and the symlinks into it are dangling.
+  rsync -a --delete "$tmp/" "$dest/"
+  chmod 700 "$dest"
+  info "installed $count rendered file(s) into $dest"
+}
+
+# ----------------------------------------------------------------- hooks ----
+
+run_hook() {
+  local hook="$REPO/hooks/$1"
+  [ -x "$hook" ] || return 0
+  info "running $1 hook for $REPO_ID"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    step "would run $hook"
+    return 0
+  fi
+  DOTFILES_REPO="$REPO" DOTFILES_TARGET="$TARGET" DOTFILES_HOST="$HOST" \
+    OP_VAULT="$OP_VAULT" "$hook"
+}
+
+install_repo() {
+  run_hook pre-install
+  secrets_repo
+  link_repo
+  run_hook post-install
+}
+
+# ---------------------------------------------------------------- status ----
+
+abspath() {
+  printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+}
+
+# True when $1 is a symlink resolving to the file $2.
+points_at() {
+  local link="$1" want="$2" target abs
+  [ -L "$link" ] || return 1
+  target="$(readlink "$link")"
+  case "$target" in
+    /*) abs="$target" ;;
+    *)  abs="$(dirname "$link")/$target" ;;
+  esac
+  [ -e "$abs" ] || return 1
+  [ "$(abspath "$abs")" = "$(abspath "$want")" ]
+}
+
+status_repo() {
+  printf '%s%s%s  %s\n' "$C_BOLD" "$REPO_ID" "$C_RESET" "$REPO"
+
+  local pkg linked total src rel dst color
+  for pkg in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
+    linked=0
+    total=0
+    while IFS= read -r -d '' src; do
+      total=$((total + 1))
+      rel="${src#"$PACKAGES_PATH/$pkg/"}"
+      dst="$TARGET/$rel"
+      if points_at "$dst" "$src"; then
+        linked=$((linked + 1))
+      fi
+    done < <(find "$PACKAGES_PATH/$pkg" -type f -print0 2>/dev/null)
+
+    if [ "$total" -gt 0 ] && [ "$linked" -eq "$total" ]; then
+      color="$C_GREEN"
+    else
+      color="$C_YELLOW"
+    fi
+    printf '  %-14s %s%d/%d linked%s\n' "$pkg" "$color" "$linked" "$total" "$C_RESET"
+  done
+
+  if [ -d "$TEMPLATES_PATH" ]; then
+    local n
+    n="$(find "$TEMPLATES_PATH" -type f ! -name '.DS_Store' | wc -l | tr -d ' ')"
+    if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
+      printf '  %-14s %s template(s), rendered into %s\n' "secrets" "$n" "$SECRETS_PATH/$SECRETS_PACKAGE"
+    else
+      printf '  %-14s %s template(s), %snot yet rendered%s\n' "secrets" "$n" "$C_YELLOW" "$C_RESET"
+    fi
+  fi
+  printf '\n'
+}
+
+# ---------------------------------------------------------------- doctor ----
+
+DOCTOR_INSTALL=0
+
+check_cmd() {
+  local cmd="$1" kind="$2" pkg="$3"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    printf '  %s ok%s      %-16s %s\n' "$C_GREEN" "$C_RESET" "$cmd" "$(command -v "$cmd")"
+    return 0
+  fi
+
+  if [ "$DOCTOR_INSTALL" -eq 1 ] && command -v brew >/dev/null 2>&1; then
+    printf '  %s..%s      %-16s installing via brew\n' "$C_YELLOW" "$C_RESET" "$cmd"
+    if [ "$kind" = cask ]; then
+      brew install --cask "$pkg"
+    else
+      brew install "$pkg"
+    fi
+    return 0
+  fi
+
+  if [ "$kind" = cask ]; then
+    printf '  %smiss%s    %-16s brew install --cask %s\n' "$C_RED" "$C_RESET" "$cmd" "$pkg"
+  else
+    printf '  %smiss%s    %-16s brew install %s\n' "$C_RED" "$C_RESET" "$cmd" "$pkg"
+  fi
+  return 1
+}
+
+cmd_doctor() {
+  local rc=0
+
+  info "dependencies"
+  check_cmd stow formula stow || rc=1
+  check_cmd op cask 1password-cli || rc=1
+  check_cmd rsync formula rsync || rc=1
+  check_cmd git formula git || rc=1
+
+  info "1Password"
+  if command -v op >/dev/null 2>&1; then
+    if op whoami >/dev/null 2>&1; then
+      printf '  %s ok%s      signed in as %s\n' "$C_GREEN" "$C_RESET" "$(op whoami --format json 2>/dev/null | sed -n 's/.*"email": *"\([^"]*\)".*/\1/p' | head -1)"
+    else
+      printf '  %smiss%s    not signed in; run: op signin\n' "$C_RED" "$C_RESET"
+      rc=1
+    fi
+  fi
+
+  info "config"
+  if [ -f "$CONFIG_FILE" ] || [ -n "${DOTFILES_REPOS:-}" ]; then
+    printf '  %s ok%s      %s\n' "$C_GREEN" "$C_RESET" "$CONFIG_FILE"
+    local repo
+    while IFS= read -r repo; do
+      [ -n "$repo" ] || continue
+      if [ -d "$repo" ]; then
+        if [ -f "$repo/dotfiles.conf" ]; then
+          printf '  %s ok%s      %s\n' "$C_GREEN" "$C_RESET" "$repo"
+        else
+          printf '  %swarn%s    %s (no dotfiles.conf)\n' "$C_YELLOW" "$C_RESET" "$repo"
+        fi
+      else
+        printf '  %smiss%s    %s (not found)\n' "$C_RED" "$C_RESET" "$repo"
+        rc=1
+      fi
+    done <<EOF
+$(repo_list 2>/dev/null || true)
+EOF
+  else
+    printf '  %smiss%s    %s does not exist\n' "$C_RED" "$C_RESET" "$CONFIG_FILE"
+    rc=1
+  fi
+
+  return $rc
+}
+
+# ------------------------------------------------------------------ main ----
+
+usage() {
+  cat <<EOF
+$PROGRAM $VERSION -- link config repos into \$HOME with stow + 1Password
+
+usage: $PROGRAM <command> [options]
+
+commands:
+  install     render secrets, then link everything (runs hooks)
+  link        stow the packages of every configured repo
+  unlink      unstow them again
+  secrets     render templates/ through \`op inject\` only
+  status      show what is configured and what is currently linked
+  doctor      check dependencies and configuration
+  help        this message
+
+options:
+  -n, --dry-run   show what would happen, change nothing
+  -v, --verbose   pass --verbose to stow, print more
+      --adopt     stow --adopt: pull existing files into the repo (link only)
+      --install   doctor only: brew install anything missing
+
+environment:
+  DOTFILES_CONFIG   config file (default $CONFIG_FILE)
+  DOTFILES_STATE    state dir for rendered secrets (default $STATE_DIR)
+  DOTFILES_REPOS    colon-separated repo list, overrides the config file
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  [ $# -gt 0 ] && shift || true
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n|--dry-run) DRY_RUN=1 ;;
+      -v|--verbose) VERBOSE=1 ;;
+      --adopt)      ADOPT=1 ;;
+      --install)    DOCTOR_INSTALL=1 ;;
+      -h|--help)    usage; return 0 ;;
+      *)            die "unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  case "$cmd" in
+    install)  need_cmd stow; for_each_repo install_repo; info "done" ;;
+    link)     need_cmd stow; for_each_repo link_repo; info "done" ;;
+    unlink)   need_cmd stow; for_each_repo unlink_repo; info "done" ;;
+    secrets)  for_each_repo secrets_repo; info "done" ;;
+    status)   for_each_repo status_repo ;;
+    doctor)   cmd_doctor ;;
+    version|--version) printf '%s %s\n' "$PROGRAM" "$VERSION" ;;
+    help|--help|-h) usage ;;
+    *)        usage >&2; die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
