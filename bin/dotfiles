@@ -87,6 +87,7 @@ load_repo() {
 
   REPO_ID="$(basename "$REPO")"
   PACKAGES=()
+  DEPENDENCIES=()
   OP_VAULT=""
   OP_ACCOUNT=""
   PACKAGES_DIR="packages"
@@ -135,6 +136,65 @@ $repos
 EOF
 
   [ "$found" -eq 1 ] || die "no config repos configured in $CONFIG_FILE"
+}
+
+# ---------------------------------------------------------- dependencies ----
+
+# A DEPENDENCIES entry is "command [package] [cask]" -- the command to look for,
+# the brew package providing it if the names differ, and the word "cask" if it
+# is one. The engine has no built-in list; these come from the config repo, so
+# a machine only installs what its own dotfiles actually need.
+parse_dep() {
+  # shellcheck disable=SC2086
+  set -- $1
+  DEP_CMD="$1"
+  DEP_PKG="${2:-$1}"
+  DEP_KIND="${3:-formula}"
+}
+
+brew_install_dep() {
+  if command -v "$DEP_CMD" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! command -v brew >/dev/null 2>&1; then
+    warn "$DEP_CMD is missing and brew is not available to install $DEP_PKG"
+    return 1
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    step "would install $DEP_PKG"
+    return 0
+  fi
+
+  step "installing $DEP_PKG"
+  if [ "$DEP_KIND" = cask ]; then
+    brew install --cask "$DEP_PKG"
+  else
+    brew install "$DEP_PKG"
+  fi
+}
+
+ensure_deps_repo() {
+  if [ ${#DEPENDENCIES[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  local entry announced=0
+  for entry in "${DEPENDENCIES[@]}"; do
+    parse_dep "$entry"
+    if command -v "$DEP_CMD" >/dev/null 2>&1; then
+      continue
+    fi
+    if [ "$announced" -eq 0 ]; then
+      info "installing dependencies for $REPO_ID"
+      announced=1
+    fi
+    # A dependency that will not install is worth a warning, not an abort:
+    # the rest of the config is still worth putting in place.
+    brew_install_dep || true
+  done
+  return 0
 }
 
 # --------------------------------------------------------------- stowing ----
@@ -307,6 +367,7 @@ run_hook() {
 }
 
 install_repo() {
+  ensure_deps_repo
   run_hook pre-install
   secrets_repo
   link_repo
@@ -397,10 +458,29 @@ check_cmd() {
   return 1
 }
 
+# Set by doctor_deps_repo, which runs through for_each_repo and so cannot
+# usefully return a status of its own.
+DOCTOR_RC=0
+
+doctor_deps_repo() {
+  if [ ${#DEPENDENCIES[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  info "dependencies for $REPO_ID"
+  local entry
+  for entry in "${DEPENDENCIES[@]}"; do
+    parse_dep "$entry"
+    check_cmd "$DEP_CMD" "$DEP_KIND" "$DEP_PKG" || DOCTOR_RC=1
+  done
+  return 0
+}
+
 cmd_doctor() {
   local rc=0
+  DOCTOR_RC=0
 
-  info "dependencies"
+  info "engine dependencies"
   check_cmd stow formula stow || rc=1
   check_cmd op cask 1password-cli || rc=1
   check_cmd rsync formula rsync || rc=1
@@ -417,8 +497,12 @@ cmd_doctor() {
   fi
 
   info "config"
+  if [ -n "${DOTFILES_REPOS:-}" ]; then
+    printf '  %s%-6s%s DOTFILES_REPOS=%s\n' "$C_GREEN" ok "$C_RESET" "$DOTFILES_REPOS"
+  fi
   if [ -f "$CONFIG_FILE" ] || [ -n "${DOTFILES_REPOS:-}" ]; then
-    printf '  %s%-6s%s %s\n' "$C_GREEN" ok "$C_RESET" "$CONFIG_FILE"
+    [ -n "${DOTFILES_REPOS:-}" ] ||
+      printf '  %s%-6s%s %s\n' "$C_GREEN" ok "$C_RESET" "$CONFIG_FILE"
     local repo
     while IFS= read -r repo; do
       [ -n "$repo" ] || continue
@@ -440,6 +524,13 @@ EOF
     rc=1
   fi
 
+  # Whatever the config repos declare for themselves, on top of the engine's
+  # own requirements above.
+  if [ -f "$CONFIG_FILE" ] || [ -n "${DOTFILES_REPOS:-}" ]; then
+    for_each_repo doctor_deps_repo
+    [ "$DOCTOR_RC" -eq 0 ] || rc=1
+  fi
+
   return $rc
 }
 
@@ -452,12 +543,12 @@ $PROGRAM $VERSION -- link config repos into \$HOME with stow + 1Password
 usage: $PROGRAM <command> [options]
 
 commands:
-  install     render secrets, then link everything (runs hooks)
+  install     install declared dependencies, render secrets, link, run hooks
   link        stow the packages of every configured repo
   unlink      unstow them again
   secrets     render templates/ through \`op inject\` only
   status      show what is configured and what is currently linked
-  doctor      check dependencies and configuration
+  doctor      check dependencies (engine's and each repo's) and configuration
   help        this message
 
 options:

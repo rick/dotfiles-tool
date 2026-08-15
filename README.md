@@ -16,9 +16,10 @@ ln -s ~/git/dotfiles-tool/bin/dotfiles ~/bin/dotfiles   # or anywhere on PATH
 dotfiles doctor --install     # installs stow + 1password-cli via brew
 ```
 
-`doctor --install` installs only what the engine itself needs. Anything else a
-machine wants (a Brewfile, mise, whatever) belongs in a config repo's
-`hooks/post-install`, not here.
+`doctor --install` installs what the engine itself needs. Anything a particular
+config repo needs is that repo's business — it declares those in its
+`DEPENDENCIES`, and `dotfiles install` puts them in place. Bigger setup jobs
+(a Brewfile, mise, whatever) belong in `hooks/post-install`.
 
 ## Configure
 
@@ -62,6 +63,7 @@ Sourced as bash, so it can branch on `$HOST`, `$(uname)`, or anything else.
 | variable | default | meaning |
 | --- | --- | --- |
 | `PACKAGES` | every dir under `packages/` | which packages to stow, in order |
+| `DEPENDENCIES` | *(none)* | commands this config needs; installed with brew when missing |
 | `OP_VAULT` | *(empty)* | exported to templates as `$OP_VAULT` |
 | `OP_ACCOUNT` | *(empty)* | which 1Password account to resolve against |
 | `PACKAGES_DIR` | `packages` | |
@@ -73,10 +75,19 @@ Sourced as bash, so it can branch on `$HOST`, `$(uname)`, or anything else.
 OP_VAULT="Work"
 PACKAGES=(bash git tmux vim)
 
+# "command [brew package] [cask]" -- package defaults to the command name.
+DEPENDENCIES=(
+  "starship"
+  "op 1password-cli cask"
+)
+
 case "$HOST" in
   some-laptop) PACKAGES+=(docker) ;;
 esac
 ```
+
+A missing dependency that will not install is a warning, not a fatal error —
+the rest of the config still gets linked.
 
 ### Templates and secrets
 
