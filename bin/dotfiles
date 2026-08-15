@@ -88,6 +88,7 @@ load_repo() {
   REPO_ID="$(basename "$REPO")"
   PACKAGES=()
   OP_VAULT=""
+  OP_ACCOUNT=""
   PACKAGES_DIR="packages"
   TEMPLATES_DIR="templates"
   SECRETS_PACKAGE="private"
@@ -218,12 +219,20 @@ secrets_repo() {
   # an account even when it has nothing to resolve, and there is no reason to
   # make a repo that has not started using secrets yet sign in to 1Password.
   # The grep deliberately does not try to tell code from comments.
+  # Secret references carry a vault but not an account. With more than one
+  # account signed in, an unqualified reference silently resolves against
+  # whichever one op considers default -- so pin it when the repo says to.
+  local op_args=()
+  if [ -n "$OP_ACCOUNT" ]; then
+    op_args=(--account "$OP_ACCOUNT")
+  fi
+
   local use_op=0
   if grep -rqI 'op://' "$TEMPLATES_PATH" 2>/dev/null; then
     use_op=1
     need_cmd op
-    op whoami >/dev/null 2>&1 ||
-      die "1Password CLI is not signed in. Run: op signin"
+    op whoami ${op_args[@]+"${op_args[@]}"} >/dev/null 2>&1 ||
+      die "1Password CLI is not signed in${OP_ACCOUNT:+ for account $OP_ACCOUNT}. Run: op signin${OP_ACCOUNT:+ --account $OP_ACCOUNT}"
   else
     debug "no op:// references under $TEMPLATES_PATH; copying templates verbatim"
   fi
@@ -245,7 +254,8 @@ secrets_repo() {
       # references may interpolate them, which keeps one template usable
       # across machines and vaults.
       hostname="$HOST" OP_VAULT="$OP_VAULT" DOTFILES_HOST="$HOST" \
-        op inject --in-file "$tpl" --out-file "$out" >/dev/null || ok=0
+        op inject ${op_args[@]+"${op_args[@]}"} \
+          --in-file "$tpl" --out-file "$out" >/dev/null || ok=0
     else
       cp "$tpl" "$out" || ok=0
     fi

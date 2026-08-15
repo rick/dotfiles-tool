@@ -63,6 +63,7 @@ Sourced as bash, so it can branch on `$HOST`, `$(uname)`, or anything else.
 | --- | --- | --- |
 | `PACKAGES` | every dir under `packages/` | which packages to stow, in order |
 | `OP_VAULT` | *(empty)* | exported to templates as `$OP_VAULT` |
+| `OP_ACCOUNT` | *(empty)* | which 1Password account to resolve against |
 | `PACKAGES_DIR` | `packages` | |
 | `TEMPLATES_DIR` | `templates` | |
 | `SECRETS_PACKAGE` | `private` | name of the generated package |
@@ -95,6 +96,13 @@ Two variables are exported for templates to interpolate:
 [user]
 	signingKey = "op://$OP_VAULT/SSH Signing Keys/$hostname"
 ```
+
+Set `OP_ACCOUNT` whenever more than one 1Password account is signed in on a
+machine. A secret reference names a vault but not an account, so an unqualified
+reference resolves against whichever account `op` treats as default — and
+"Private" is an alias for the personal vault in *every* account, so a reference
+meant for one account will happily go looking in another and fail, or worse,
+find a same-named item.
 
 Rendering is all-or-nothing. If any template fails — expired `op` session,
 renamed item, typo'd reference — nothing is swapped into place and the
