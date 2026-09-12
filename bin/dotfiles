@@ -87,6 +87,7 @@ load_repo() {
 
   REPO_ID="$(basename "$REPO")"
   PACKAGES=()
+  TEMPLATES=()
   DEPENDENCIES=()
   OP_VAULT=""
   OP_ACCOUNT=""
@@ -275,7 +276,29 @@ unlink_repo() {
 
 # --------------------------------------------------------------- secrets ----
 
-# Render every file under templates/ through `op inject` into a scratch dir,
+# Emit the templates to render, NUL-separated: every file under templates/
+# unless TEMPLATES names a subset, as paths relative to templates/. That lets
+# dotfiles.conf leave a secret off some hosts the same way it gates packages.
+template_files() {
+  if [ ${#TEMPLATES[@]} -eq 0 ]; then
+    find "$TEMPLATES_PATH" -type f ! -name '.DS_Store' -print0
+    return 0
+  fi
+  local t
+  for t in "${TEMPLATES[@]}"; do
+    printf '%s\0' "$TEMPLATES_PATH/$t"
+  done
+}
+
+check_templates() {
+  local t
+  for t in ${TEMPLATES[@]+"${TEMPLATES[@]}"}; do
+    [ -f "$TEMPLATES_PATH/$t" ] ||
+      die "template '$t' listed in $REPO/dotfiles.conf but $TEMPLATES_PATH/$t does not exist"
+  done
+}
+
+# Render the selected templates through `op inject` into a scratch dir,
 # and only swap it into place once all of them succeeded. A half-rendered tree
 # must never reach the state dir: stow symlinks point at it, and a partial
 # swap would leave those links dangling.
@@ -288,6 +311,7 @@ secrets_repo() {
   info "rendering secrets for $REPO_ID"
 
   need_cmd rsync
+  check_templates
 
   # Templates with no secret references are copied verbatim. `op inject` wants
   # an account even when it has nothing to resolve, and there is no reason to
@@ -302,7 +326,7 @@ secrets_repo() {
   fi
 
   local use_op=0
-  if grep -rqI 'op://' "$TEMPLATES_PATH" 2>/dev/null; then
+  if template_files | xargs -0 grep -qI 'op://' 2>/dev/null; then
     use_op=1
     need_cmd op
     op whoami ${op_args[@]+"${op_args[@]}"} >/dev/null 2>&1 ||
@@ -342,7 +366,7 @@ secrets_repo() {
       warn "could not render $rel"
       failed=1
     fi
-  done < <(find "$TEMPLATES_PATH" -type f ! -name '.DS_Store' -print0)
+  done < <(template_files)
 
   if [ "$failed" -ne 0 ]; then
     die "one or more templates failed to render; left $dest untouched"
@@ -433,7 +457,7 @@ status_repo() {
 
   if [ -d "$TEMPLATES_PATH" ]; then
     local n
-    n="$(find "$TEMPLATES_PATH" -type f ! -name '.DS_Store' | wc -l | tr -d ' ')"
+    n="$(template_files | tr -dc '\0' | wc -c | tr -d ' ')"
     if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
       printf '  %-14s %s template(s), rendered into %s\n' "secrets" "$n" "$SECRETS_PATH/$SECRETS_PACKAGE"
     else

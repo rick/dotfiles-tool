@@ -63,6 +63,7 @@ Sourced as bash, so it can branch on `$HOST`, `$(uname)`, or anything else.
 | variable | default | meaning |
 | --- | --- | --- |
 | `PACKAGES` | every dir under `packages/` | which packages to stow, in order |
+| `TEMPLATES` | every file under `templates/` | which templates to render, relative to `templates/` |
 | `DEPENDENCIES` | *(none)* | commands this config needs; installed with brew when missing |
 | `OP_VAULT` | *(empty)* | exported to templates as `$OP_VAULT` |
 | `OP_ACCOUNT` | *(empty)* | which 1Password account to resolve against |
@@ -94,6 +95,17 @@ the rest of the config still gets linked.
 Every file under `templates/` is rendered through `op inject` and the result is
 written to `~/.local/share/dotfiles/<repo>/private/`, which is then stowed as a
 normal package. Rendered files are `0600`; the directory is `0700`.
+
+Set `TEMPLATES` to render only some of them — it takes paths relative to
+`templates/` and, like `PACKAGES`, can be built up per host:
+
+```bash
+TEMPLATES=(.gitconfig)
+case "$HOST" in
+  work-laptop) ;;
+  *) TEMPLATES+=(.s3cfg) ;;   # a secret that stays off the work machine
+esac
+```
 
 Nothing is written into the config repo itself, so the repo stays clean and
 there is no gitignored `private/` directory to accidentally commit.
