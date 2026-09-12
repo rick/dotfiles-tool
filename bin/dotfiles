@@ -431,35 +431,43 @@ points_at() {
   [ "$(abspath "$abs")" = "$(abspath "$want")" ]
 }
 
+# Print one "name  linked/total" line for the stow package rooted at $2.
+status_package() {
+  local name="$1" root="$2"
+  local linked=0 total=0 src rel dst color
+  while IFS= read -r -d '' src; do
+    total=$((total + 1))
+    rel="${src#"$root/"}"
+    dst="$TARGET/$rel"
+    if points_at "$dst" "$src"; then
+      linked=$((linked + 1))
+    fi
+  done < <(find "$root" -type f -print0 2>/dev/null)
+
+  if [ "$total" -gt 0 ] && [ "$linked" -eq "$total" ]; then
+    color="$C_GREEN"
+  else
+    color="$C_YELLOW"
+  fi
+  printf '  %-14s %s%d/%d linked%s' "$name" "$color" "$linked" "$total" "$C_RESET"
+}
+
 status_repo() {
   printf '%s%s%s  %s\n' "$C_BOLD" "$REPO_ID" "$C_RESET" "$REPO"
 
-  local pkg linked total src rel dst color
+  local pkg
   for pkg in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
-    linked=0
-    total=0
-    while IFS= read -r -d '' src; do
-      total=$((total + 1))
-      rel="${src#"$PACKAGES_PATH/$pkg/"}"
-      dst="$TARGET/$rel"
-      if points_at "$dst" "$src"; then
-        linked=$((linked + 1))
-      fi
-    done < <(find "$PACKAGES_PATH/$pkg" -type f -print0 2>/dev/null)
-
-    if [ "$total" -gt 0 ] && [ "$linked" -eq "$total" ]; then
-      color="$C_GREEN"
-    else
-      color="$C_YELLOW"
-    fi
-    printf '  %-14s %s%d/%d linked%s\n' "$pkg" "$color" "$linked" "$total" "$C_RESET"
+    status_package "$pkg" "$PACKAGES_PATH/$pkg"
+    printf '\n'
   done
 
+  # The rendered secrets are a package too, so report them the same way.
   if [ -d "$TEMPLATES_PATH" ]; then
     local n
     n="$(template_files | tr -dc '\0' | wc -c | tr -d ' ')"
     if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
-      printf '  %-14s %s template(s), rendered into %s\n' "secrets" "$n" "$SECRETS_PATH/$SECRETS_PACKAGE"
+      status_package "secrets" "$SECRETS_PATH/$SECRETS_PACKAGE"
+      printf '  (%s template(s), rendered into %s)\n' "$n" "$SECRETS_PATH/$SECRETS_PACKAGE"
     else
       printf '  %-14s %s template(s), %snot yet rendered%s\n' "secrets" "$n" "$C_YELLOW" "$C_RESET"
     fi
