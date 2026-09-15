@@ -205,7 +205,11 @@ point across several machines.
 
 `dotfiles install` baselines instead: a new machine records every existing
 migration as already applied without printing any of them, since a migration
-describes a transition away from a state that machine never had. Steps every
+describes a transition away from a state that machine never had. "New" means
+no `installed` marker beside `migrations.applied` — deleting the
+acknowledgements alone brings every note back rather than silently baselining
+them away. Clearing the whole state directory does still look like a new
+machine. Steps every
 machine needs belong in the README or `hooks/post-install` — the login shell
 above is genuinely both, so it goes in both places.
 
