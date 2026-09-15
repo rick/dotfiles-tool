@@ -42,6 +42,7 @@ step()  { printf '  %s->%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 warn()  { printf '%swarning:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 die()   { printf '%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 debug() { [ "$VERBOSE" -eq 1 ] && printf '     %s%s%s\n' "$C_DIM" "$*" "$C_RESET" || true; }
+repo_header() { printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"; }
 
 cleanup() {
   local d
@@ -428,7 +429,9 @@ install_repo() {
 # A migration is a markdown note in a repo's migrations/, named by its id. The
 # engine only ever prints one and records that you said you had dealt with it.
 MIGRATIONS_QUIT=0
+MIGRATIONS_ACK_ALL=0
 MIGRATIONS_ALL=0
+MIGRATION_ACTION=""
 MIGRATION_TARGET_ID=""
 MIGRATION_REPO=""
 MIGRATION_FOUND=0
@@ -446,13 +449,9 @@ migration_applied() {
 }
 
 migration_pending() {
-  local id
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    migration_applied "$id" || printf '%s\n' "$id"
-  done <<EOF
-$(migration_ids)
-EOF
+  migration_ids | awk -v state="$MIGRATIONS_STATE" '
+    BEGIN { while ((getline line < state) > 0) { split(line, f, "\t"); seen[f[1]] = 1 } }
+    !($0 in seen)'
 }
 
 migration_when() {
@@ -462,12 +461,12 @@ migration_when() {
 
 migration_title() {
   local title
-  title="$(sed -n 's/^# *//p' "$MIGRATIONS_PATH/$1.md" 2>/dev/null | head -1)"
+  title="$(sed -n '/^# /{s/^# *//p;q;}' "$MIGRATIONS_PATH/$1.md" 2>/dev/null || true)"
   printf '%s\n' "${title:-$1}"
 }
 
 migration_mark() {
-  mkdir -p "$(dirname "$MIGRATIONS_STATE")"
+  mkdir -p "${MIGRATIONS_STATE%/*}"
   printf '%s\t%s\n' "$1" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$MIGRATIONS_STATE"
 }
 
@@ -493,11 +492,14 @@ baseline_migrations() {
   done <<EOF
 $(migration_ids)
 EOF
-  [ "$n" -eq 0 ] || step "baselined $n migration(s) as already applied"
+  local verb="baselined"
+  [ "$DRY_RUN" -eq 0 ] || verb="would baseline"
+  [ "$n" -eq 0 ] || step "$verb $n migration(s) as already applied"
 }
 
 migrations_repo() {
-  local pending id reply count ack_all=0
+  local pending id reply count
+  [ "$MIGRATIONS_QUIT" -eq 0 ] || return 0
   pending="$(migration_pending)"
   [ -n "$pending" ] || return 0
 
@@ -506,12 +508,13 @@ migrations_repo() {
 
   while IFS= read -r id; do
     [ -n "$id" ] || continue
+    [ "$MIGRATIONS_QUIT" -eq 0 ] || break
     migration_render "$id"
 
-    if [ "$DRY_RUN" -eq 1 ] || [ "$MIGRATIONS_QUIT" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
       continue
     fi
-    if [ "$ack_all" -eq 1 ]; then
+    if [ "$MIGRATIONS_ACK_ALL" -eq 1 ]; then
       migration_mark "$id"
       step "marked $id done"
       continue
@@ -523,7 +526,7 @@ migrations_repo() {
     read -r reply </dev/tty || true
     case "$reply" in
       y|Y) migration_mark "$id"; step "marked $id done" ;;
-      a|A) ack_all=1; migration_mark "$id"; step "marked $id done" ;;
+      a|A) MIGRATIONS_ACK_ALL=1; migration_mark "$id"; step "marked $id done" ;;
       q|Q) MIGRATIONS_QUIT=1 ;;
     esac
   done <<EOF
@@ -537,40 +540,43 @@ EOF
 }
 
 migrations_list_repo() {
-  local ids id next width=0 label color suffix when
+  local ids id next width label color suffix when pending unapplied
 
+  pending="$(migration_pending)"
   if [ "$MIGRATIONS_ALL" -eq 1 ]; then
     ids="$(migration_ids)"
   else
-    ids="$(migration_pending)"
+    ids="$pending"
   fi
   [ -n "$ids" ] || return 0
 
-  next="$(migration_pending)"
-  next="${next%%$'\n'*}"
+  next="${pending%%$'\n'*}"
+  unapplied=$'\n'"$pending"$'\n'
 
   # Pad the id column to the widest one actually shown; they vary a lot.
-  while IFS= read -r id; do
-    [ "${#id}" -le "$width" ] || width="${#id}"
-  done <<EOF
-$ids
-EOF
+  width="$(printf '%s\n' "$ids" |
+    awk '{ if (length($0) > w) w = length($0) } END { print w + 0 }')"
 
-  printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
+  repo_header
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     MIGRATION_FOUND=1
 
     suffix=""
-    if migration_applied "$id"; then
-      label="done"; color="$C_GREEN"
-      when="$(migration_when "$id")"
-      suffix="  $C_DIM(${when%%T*})$C_RESET"
-    elif [ "$id" = "$next" ]; then
-      label="next"; color="$C_YELLOW$C_BOLD"
-    else
-      label="todo"; color="$C_DIM"
-    fi
+    case "$unapplied" in
+      *$'\n'"$id"$'\n'*)
+        if [ "$id" = "$next" ]; then
+          label="next"; color="$C_YELLOW$C_BOLD"
+        else
+          label="todo"; color="$C_DIM"
+        fi
+        ;;
+      *)
+        label="done"; color="$C_GREEN"
+        when="$(migration_when "$id")"
+        suffix="  $C_DIM(${when%%T*})$C_RESET"
+        ;;
+    esac
 
     printf '  %s%-4s%s  %-*s  %s%s\n' \
       "$color" "$label" "$C_RESET" "$width" "$id" "$(migration_title "$id")" "$suffix"
@@ -580,63 +586,35 @@ EOF
   printf '\n'
 }
 
-migrations_done_repo() {
-  local id
+migrations_act_repo() {
+  local id ids
+
   if [ -n "$MIGRATION_TARGET_ID" ]; then
     [ -f "$MIGRATIONS_PATH/$MIGRATION_TARGET_ID.md" ] || return 0
-    MIGRATION_FOUND=1
-    if migration_applied "$MIGRATION_TARGET_ID"; then
-      step "$REPO_ID: $MIGRATION_TARGET_ID was already done"
-    else
-      migration_mark "$MIGRATION_TARGET_ID"
-      step "$REPO_ID: marked $MIGRATION_TARGET_ID done"
-    fi
-    return 0
+    ids="$MIGRATION_TARGET_ID"
+  else
+    # Without --all only the first pending one anywhere is acted on.
+    [ "$MIGRATIONS_ALL" -eq 1 ] || [ "$MIGRATION_FOUND" -eq 0 ] || return 0
+    ids="$(migration_pending)"
+    [ -n "$ids" ] || return 0
+    [ "$MIGRATIONS_ALL" -eq 1 ] || ids="${ids%%$'\n'*}"
   fi
 
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     MIGRATION_FOUND=1
-    migration_mark "$id"
-    step "$REPO_ID: marked $id done"
+    if [ "$MIGRATION_ACTION" = show ]; then
+      repo_header
+      migration_render "$id"
+    elif migration_applied "$id"; then
+      step "$REPO_ID: $id was already done"
+    else
+      migration_mark "$id"
+      step "$REPO_ID: marked $id done"
+    fi
   done <<EOF
-$(migration_pending)
+$ids
 EOF
-  return 0
-}
-
-# Stops at the first repo with anything pending, so repo order decides.
-migrations_show_first_repo() {
-  [ -z "$MIGRATION_TARGET_ID" ] || return 0
-
-  local pending
-  pending="$(migration_pending)"
-  [ -n "$pending" ] || return 0
-
-  MIGRATION_TARGET_ID="${pending%%$'\n'*}"
-  MIGRATION_FOUND=1
-  printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
-  migration_render "$MIGRATION_TARGET_ID"
-}
-
-migrations_done_first_repo() {
-  [ -z "$MIGRATION_TARGET_ID" ] || return 0
-
-  local pending
-  pending="$(migration_pending)"
-  [ -n "$pending" ] || return 0
-
-  MIGRATION_TARGET_ID="${pending%%$'\n'*}"
-  MIGRATION_FOUND=1
-  migration_mark "$MIGRATION_TARGET_ID"
-  step "$REPO_ID: marked $MIGRATION_TARGET_ID done"
-}
-
-migrations_show_repo() {
-  [ -f "$MIGRATIONS_PATH/$MIGRATION_TARGET_ID.md" ] || return 0
-  MIGRATION_FOUND=1
-  printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
-  migration_render "$MIGRATION_TARGET_ID"
   return 0
 }
 
@@ -647,13 +625,14 @@ slugify() {
 }
 
 # Load one repo: the one named by --repo, else the first configured.
+# REPO_ID is the basename, so matching needs no dotfiles.conf sourced.
 select_repo() {
   local want="$1" repo first=""
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    load_repo "$repo"
     [ -n "$first" ] || first="$repo"
-    if [ -n "$want" ] && [ "$REPO_ID" = "$want" ]; then
+    if [ -n "$want" ] && [ "$(basename "$repo")" = "$want" ]; then
+      load_repo "$repo"
       return 0
     fi
   done <<EOF
@@ -713,31 +692,17 @@ cmd_migrations() {
       for_each_repo migrations_list_repo
       [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
       ;;
-    'done')
+    'done'|show)
+      MIGRATION_ACTION="$sub"
       MIGRATION_TARGET_ID="${2:-}"
-      if [ -n "$MIGRATION_TARGET_ID" ]; then
-        for_each_repo migrations_done_repo
-        [ "$MIGRATION_FOUND" -eq 1 ] || die "no such migration: $MIGRATION_TARGET_ID"
-      elif [ "$MIGRATIONS_ALL" -eq 1 ]; then
-        for_each_repo migrations_done_repo
-        [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
-      else
-        for_each_repo migrations_done_first_repo
-        [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
+      for_each_repo migrations_act_repo
+      if [ "$MIGRATION_FOUND" -eq 0 ]; then
+        [ -z "$MIGRATION_TARGET_ID" ] || die "no such migration: $MIGRATION_TARGET_ID"
+        info "no pending migrations"
       fi
       ;;
     new)
       migrations_new "${2:-}"
-      ;;
-    show)
-      MIGRATION_TARGET_ID="${2:-}"
-      if [ -z "$MIGRATION_TARGET_ID" ]; then
-        for_each_repo migrations_show_first_repo
-        [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
-      else
-        for_each_repo migrations_show_repo
-        [ "$MIGRATION_FOUND" -eq 1 ] || die "no such migration: $MIGRATION_TARGET_ID"
-      fi
       ;;
     *)
       die "unknown migrations subcommand: $sub"

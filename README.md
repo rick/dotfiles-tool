@@ -172,8 +172,10 @@ dotfiles migrations --all        # the whole timeline, done ones included
 dotfiles migrations new <slug>   # create one, --repo <id> to choose the repo
 dotfiles migrations show         # the first one still pending
 dotfiles migrations show <id>
+dotfiles migrations show --all   # every pending one
 dotfiles migrations done         # mark the first one still pending
-dotfiles migrations done <id>    # or --all
+dotfiles migrations done <id>
+dotfiles migrations done --all   # mark every pending one
 ```
 
 A migration you have just written counts as pending on your own machine too,
