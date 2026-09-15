@@ -36,7 +36,9 @@ in order:
 ```bash
 dotfiles install          # render secrets, stow everything, run hooks
 dotfiles install -n       # same, but change nothing
+dotfiles update           # pull each repo, re-apply it, show pending migrations
 dotfiles status           # what is configured, what is actually linked
+dotfiles migrations       # what still needs doing by hand on this machine
 dotfiles link --adopt     # pull pre-existing files into the config repo
 dotfiles unlink
 ```
@@ -54,6 +56,8 @@ dotfiles-work/
   hooks/
     pre-install           # optional, executable
     post-install
+  migrations/             # optional, markdown notes -- see below
+    20260915-bash5-login-shell.md
 ```
 
 ### `dotfiles.conf`
@@ -69,6 +73,7 @@ Sourced as bash, so it can branch on `$HOST`, `$(uname)`, or anything else.
 | `OP_ACCOUNT` | *(empty)* | which 1Password account to resolve against |
 | `PACKAGES_DIR` | `packages` | |
 | `TEMPLATES_DIR` | `templates` | |
+| `MIGRATIONS_DIR` | `migrations` | |
 | `SECRETS_PACKAGE` | `private` | name of the generated package |
 | `TARGET` | `$HOME` | where to link |
 
@@ -132,6 +137,45 @@ renamed item, typo'd reference — nothing is swapped into place and the
 previously rendered files stay exactly as they were. This matters: stow
 symlinks point into that directory, and a partial write would leave dangling
 links across your home directory.
+
+### Migrations
+
+Some changes need a hand on each machine — a new login shell, a stale file to
+delete, a `defaults write`. Drop a markdown note in `migrations/`; the basename
+is its id, and a date prefix keeps them in order.
+
+```markdown
+# Switch the login shell to Homebrew's bash
+
+bash-completion needs 4.2+; stock /bin/bash is 3.2.
+
+    echo /opt/homebrew/bin/bash | sudo tee -a /etc/shells
+    chsh -s /opt/homebrew/bin/bash
+```
+
+`dotfiles update` prints the ones this machine has not acknowledged and offers
+to mark them done. **Nothing is ever executed** — a migration is a note to you,
+so it can say things no script could safely do on its own.
+
+```bash
+dotfiles migrations              # pending
+dotfiles migrations --all        # and the ones already done, with dates
+dotfiles migrations show <id>
+dotfiles migrations done <id>    # or --all
+```
+
+Acknowledgements live in `~/.local/share/dotfiles/<repo>/migrations.applied`,
+one `id<TAB>timestamp` per line, per machine. It is plain text on purpose: did
+the steps by hand? Append the id. Want a note back? Delete the line.
+
+Being *shown* a migration never marks it done — only you do, which is the whole
+point across several machines.
+
+`dotfiles install` baselines instead: a new machine records every existing
+migration as already applied without printing any of them, since a migration
+describes a transition away from a state that machine never had. Steps every
+machine needs belong in the README or `hooks/post-install` — the login shell
+above is genuinely both, so it goes in both places.
 
 ### Layering several repos
 

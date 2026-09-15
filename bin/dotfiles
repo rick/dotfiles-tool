@@ -12,7 +12,7 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 : "${XDG_CONFIG_HOME:=$HOME/.config}"
 : "${XDG_DATA_HOME:=$HOME/.local/share}"
@@ -25,6 +25,8 @@ DRY_RUN=0
 ADOPT=0
 VERBOSE=0
 TMPDIRS=""
+
+if [ -t 0 ] && [ -t 1 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
 
 # ---------------------------------------------------------------- output ----
 
@@ -93,6 +95,7 @@ load_repo() {
   OP_ACCOUNT=""
   PACKAGES_DIR="packages"
   TEMPLATES_DIR="templates"
+  MIGRATIONS_DIR="migrations"
   SECRETS_PACKAGE="private"
   TARGET="$HOME"
 
@@ -107,6 +110,9 @@ load_repo() {
   PACKAGES_PATH="$REPO/$PACKAGES_DIR"
   TEMPLATES_PATH="$REPO/$TEMPLATES_DIR"
   SECRETS_PATH="$STATE_DIR/$REPO_ID"
+  MIGRATIONS_PATH="$REPO/$MIGRATIONS_DIR"
+  # Sibling of the secrets package, which secrets_repo rsyncs --delete into.
+  MIGRATIONS_STATE="$STATE_DIR/$REPO_ID/migrations.applied"
 
   # An unset PACKAGES means "everything under packages/".
   if [ ${#PACKAGES[@]} -eq 0 ] && [ -d "$PACKAGES_PATH" ]; then
@@ -404,12 +410,260 @@ run_hook() {
     OP_VAULT="$OP_VAULT" "$hook"
 }
 
-install_repo() {
+apply_repo() {
   ensure_deps_repo
   run_hook pre-install
   secrets_repo
   link_repo
   run_hook post-install
+}
+
+install_repo() {
+  apply_repo
+  baseline_migrations
+}
+
+# ------------------------------------------------------------ migrations ----
+
+# A migration is a markdown note in a repo's migrations/, named by its id. The
+# engine only ever prints one and records that you said you had dealt with it.
+MIGRATIONS_QUIT=0
+MIGRATIONS_ALL=0
+MIGRATION_TARGET_ID=""
+MIGRATION_FOUND=0
+
+migration_ids() {
+  [ -d "$MIGRATIONS_PATH" ] || return 0
+  find "$MIGRATIONS_PATH" -maxdepth 1 -type f -name '*.md' 2>/dev/null |
+    sed -e 's|.*/||' -e 's|\.md$||' | sort
+}
+
+migration_applied() {
+  [ -f "$MIGRATIONS_STATE" ] || return 1
+  awk -F'\t' -v id="$1" '$1 == id { found = 1; exit } END { exit !found }' \
+    "$MIGRATIONS_STATE"
+}
+
+migration_pending() {
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    migration_applied "$id" || printf '%s\n' "$id"
+  done <<EOF
+$(migration_ids)
+EOF
+}
+
+migration_when() {
+  [ -f "$MIGRATIONS_STATE" ] || return 0
+  awk -F'\t' -v id="$1" '$1 == id { print $2; exit }' "$MIGRATIONS_STATE"
+}
+
+migration_title() {
+  local title
+  title="$(sed -n 's/^# *//p' "$MIGRATIONS_PATH/$1.md" 2>/dev/null | head -1)"
+  printf '%s\n' "${title:-$1}"
+}
+
+migration_mark() {
+  mkdir -p "$(dirname "$MIGRATIONS_STATE")"
+  printf '%s\t%s\n' "$1" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$MIGRATIONS_STATE"
+}
+
+migration_render() {
+  local rule='  ------------------------------------------------------------'
+  printf '\n  %s%s%s\n' "$C_BOLD" "$1" "$C_RESET"
+  printf '%s%s%s\n' "$C_DIM" "$rule" "$C_RESET"
+  sed 's/^/  /' "$MIGRATIONS_PATH/$1.md"
+  printf '%s%s%s\n' "$C_DIM" "$rule" "$C_RESET"
+}
+
+# A new machine has no older state to move away from, so it starts even.
+baseline_migrations() {
+  if [ ! -d "$MIGRATIONS_PATH" ] || [ -f "$MIGRATIONS_STATE" ]; then
+    return 0
+  fi
+
+  local id n=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [ "$DRY_RUN" -eq 1 ] || migration_mark "$id"
+    n=$((n + 1))
+  done <<EOF
+$(migration_ids)
+EOF
+  [ "$n" -eq 0 ] || step "baselined $n migration(s) as already applied"
+}
+
+migrations_repo() {
+  local pending id reply count ack_all=0
+  pending="$(migration_pending)"
+  [ -n "$pending" ] || return 0
+
+  count="$(printf '%s\n' "$pending" | wc -l | tr -d ' ')"
+  info "$count pending migration(s) for $REPO_ID"
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    migration_render "$id"
+
+    if [ "$DRY_RUN" -eq 1 ] || [ "$MIGRATIONS_QUIT" -eq 1 ]; then
+      continue
+    fi
+    if [ "$ack_all" -eq 1 ]; then
+      migration_mark "$id"
+      step "marked $id done"
+      continue
+    fi
+    [ "$INTERACTIVE" -eq 1 ] || continue
+
+    printf '  mark as done? [y/N/a/q] '
+    reply=""
+    read -r reply </dev/tty || true
+    case "$reply" in
+      y|Y) migration_mark "$id"; step "marked $id done" ;;
+      a|A) ack_all=1; migration_mark "$id"; step "marked $id done" ;;
+      q|Q) MIGRATIONS_QUIT=1 ;;
+    esac
+  done <<EOF
+$pending
+EOF
+
+  if [ "$INTERACTIVE" -eq 0 ] || [ "$MIGRATIONS_QUIT" -eq 1 ]; then
+    step "mark them done with: $PROGRAM migrations done <id>"
+  fi
+  return 0
+}
+
+migrations_list_repo() {
+  local ids id
+  if [ "$MIGRATIONS_ALL" -eq 1 ]; then
+    ids="$(migration_ids)"
+  else
+    ids="$(migration_pending)"
+  fi
+  [ -n "$ids" ] || return 0
+
+  printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    MIGRATION_FOUND=1
+    if migration_applied "$id"; then
+      printf '  %s%-5s%s %-38s %s\n' \
+        "$C_GREEN" "done" "$C_RESET" "$id" "$(migration_when "$id")"
+    else
+      printf '  %s%-5s%s %-38s %s\n' \
+        "$C_YELLOW" "todo" "$C_RESET" "$id" "$(migration_title "$id")"
+    fi
+  done <<EOF
+$ids
+EOF
+  printf '\n'
+}
+
+migrations_done_repo() {
+  local id
+  if [ -n "$MIGRATION_TARGET_ID" ]; then
+    [ -f "$MIGRATIONS_PATH/$MIGRATION_TARGET_ID.md" ] || return 0
+    MIGRATION_FOUND=1
+    if migration_applied "$MIGRATION_TARGET_ID"; then
+      step "$REPO_ID: $MIGRATION_TARGET_ID was already done"
+    else
+      migration_mark "$MIGRATION_TARGET_ID"
+      step "$REPO_ID: marked $MIGRATION_TARGET_ID done"
+    fi
+    return 0
+  fi
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    MIGRATION_FOUND=1
+    migration_mark "$id"
+    step "$REPO_ID: marked $id done"
+  done <<EOF
+$(migration_pending)
+EOF
+  return 0
+}
+
+migrations_show_repo() {
+  [ -f "$MIGRATIONS_PATH/$MIGRATION_TARGET_ID.md" ] || return 0
+  MIGRATION_FOUND=1
+  printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
+  migration_render "$MIGRATION_TARGET_ID"
+  return 0
+}
+
+cmd_migrations() {
+  local sub="${1:-list}"
+
+  case "$sub" in
+    list)
+      for_each_repo migrations_list_repo
+      [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
+      ;;
+    'done')
+      MIGRATION_TARGET_ID="${2:-}"
+      if [ -z "$MIGRATION_TARGET_ID" ] && [ "$MIGRATIONS_ALL" -eq 0 ]; then
+        die "usage: $PROGRAM migrations done <id>  (or --all)"
+      fi
+      for_each_repo migrations_done_repo
+      [ "$MIGRATION_FOUND" -eq 1 ] ||
+        die "no such migration: ${MIGRATION_TARGET_ID:-none pending}"
+      ;;
+    show)
+      MIGRATION_TARGET_ID="${2:-}"
+      [ -n "$MIGRATION_TARGET_ID" ] || die "usage: $PROGRAM migrations show <id>"
+      for_each_repo migrations_show_repo
+      [ "$MIGRATION_FOUND" -eq 1 ] || die "no such migration: $MIGRATION_TARGET_ID"
+      ;;
+    *)
+      die "unknown migrations subcommand: $sub"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------- update ----
+
+update_git_repo() {
+  if [ ! -d "$REPO/.git" ]; then
+    warn "$REPO_ID is not a git checkout; nothing to pull"
+    return 0
+  fi
+
+  local dirty ahead
+  dirty="$(git -C "$REPO" status --porcelain 2>/dev/null || true)"
+  [ -z "$dirty" ] ||
+    warn "$REPO_ID has uncommitted changes; --autostash will carry them across"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    step "would git pull --rebase"
+  else
+    step "git pull --rebase"
+    if ! git -C "$REPO" pull --rebase --autostash; then
+      warn "pull failed for $REPO_ID; sort it out and run '$PROGRAM update' again"
+      return 1
+    fi
+  fi
+
+  ahead="$(git -C "$REPO" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)"
+  [ "${ahead:-0}" = 0 ] ||
+    warn "$REPO_ID has $ahead unpushed commit(s); run: git -C $REPO push"
+  return 0
+}
+
+update_repo() {
+  info "updating $REPO_ID ($REPO)"
+  update_git_repo || return 0
+  apply_repo
+  migrations_repo
+}
+
+cmd_update() {
+  need_cmd stow
+  need_cmd git
+  for_each_repo update_repo
+  info "done"
 }
 
 # ---------------------------------------------------------------- status ----
@@ -593,6 +847,8 @@ usage: $PROGRAM <command> [options]
 
 commands:
   install     install declared dependencies, render secrets, link, run hooks
+  update      pull each repo, re-apply it, then show any pending migrations
+  migrations  list pending migrations; also \`done <id>\` and \`show <id>\`
   link        stow the packages of every configured repo
   unlink      unstow them again
   secrets     render templates/ through \`op inject\` only
@@ -605,10 +861,11 @@ options:
   -v, --verbose   pass --verbose to stow, print more
       --adopt     stow --adopt: pull existing files into the repo (link only)
       --install   doctor only: brew install anything missing
+      --all       migrations only: list applied too, or mark every one done
 
 environment:
   DOTFILES_CONFIG   config file (default $CONFIG_FILE)
-  DOTFILES_STATE    state dir for rendered secrets (default $STATE_DIR)
+  DOTFILES_STATE    state dir for secrets and migration state (default $STATE_DIR)
   DOTFILES_REPOS    colon-separated repo list, overrides the config file
 EOF
 }
@@ -617,20 +874,25 @@ main() {
   local cmd="${1:-help}"
   [ $# -gt 0 ] && shift || true
 
+  local ARGS=()
   while [ $# -gt 0 ]; do
     case "$1" in
       -n|--dry-run) DRY_RUN=1 ;;
       -v|--verbose) VERBOSE=1 ;;
       --adopt)      ADOPT=1 ;;
       --install)    DOCTOR_INSTALL=1 ;;
+      --all)        MIGRATIONS_ALL=1 ;;
       -h|--help)    usage; return 0 ;;
-      *)            die "unknown option: $1" ;;
+      -*)           die "unknown option: $1" ;;
+      *)            ARGS[${#ARGS[@]}]="$1" ;;
     esac
     shift
   done
 
   case "$cmd" in
     install)  need_cmd stow; for_each_repo install_repo; info "done" ;;
+    update)   cmd_update ;;
+    migrations) cmd_migrations ${ARGS[@]+"${ARGS[@]}"} ;;
     link)     need_cmd stow; for_each_repo link_repo; info "done" ;;
     unlink)   need_cmd stow; for_each_repo unlink_repo; info "done" ;;
     secrets)  for_each_repo secrets_repo; info "done" ;;
