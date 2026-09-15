@@ -168,15 +168,31 @@ so it can say things no script could safely do on its own.
 
 ```bash
 dotfiles migrations              # pending
-dotfiles migrations --all        # and the ones already done, with dates
+dotfiles migrations --all        # the whole timeline, done ones included
 dotfiles migrations new <slug>   # create one, --repo <id> to choose the repo
+dotfiles migrations show         # the first one still pending
 dotfiles migrations show <id>
+dotfiles migrations done         # mark the first one still pending
 dotfiles migrations done <id>    # or --all
 ```
 
 A migration you have just written counts as pending on your own machine too,
 since the tool has no idea whether you did the steps before or after writing
 them down. `migrations new` prints the `done` command for exactly that.
+
+`--all` is the summary: everything in order, one line each, with the earliest
+pending one marked `next` — the one `show` and `done` act on when given no id.
+
+```
+dotfiles-personal
+  done  20260915-bash5-login-shell   Switch the login shell to bash 5  (2026-09-15)
+  done  20261002-drop-s3cfg          Remove the old ~/.s3cfg           (2026-10-02)
+  next  20261110-ripgrep-config      Point ripgrep at the new config file
+  todo  20261201-tmux-3-4-bindings   Update the tmux bindings for 3.4
+```
+
+Order is always by id, so a migration done out of turn stays where it belongs
+on the timeline rather than jumping to the top.
 
 Acknowledgements live in `~/.local/share/dotfiles/<repo>/migrations.applied`,
 one `id<TAB>timestamp` per line, per machine. It is plain text on purpose: did

@@ -537,7 +537,8 @@ EOF
 }
 
 migrations_list_repo() {
-  local ids id
+  local ids id next width=0 label color suffix when
+
   if [ "$MIGRATIONS_ALL" -eq 1 ]; then
     ids="$(migration_ids)"
   else
@@ -545,17 +546,34 @@ migrations_list_repo() {
   fi
   [ -n "$ids" ] || return 0
 
+  next="$(migration_pending)"
+  next="${next%%$'\n'*}"
+
+  # Pad the id column to the widest one actually shown; they vary a lot.
+  while IFS= read -r id; do
+    [ "${#id}" -le "$width" ] || width="${#id}"
+  done <<EOF
+$ids
+EOF
+
   printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     MIGRATION_FOUND=1
+
+    suffix=""
     if migration_applied "$id"; then
-      printf '  %s%-5s%s %-38s %s\n' \
-        "$C_GREEN" "done" "$C_RESET" "$id" "$(migration_when "$id")"
+      label="done"; color="$C_GREEN"
+      when="$(migration_when "$id")"
+      suffix="  $C_DIM(${when%%T*})$C_RESET"
+    elif [ "$id" = "$next" ]; then
+      label="next"; color="$C_YELLOW$C_BOLD"
     else
-      printf '  %s%-5s%s %-38s %s\n' \
-        "$C_YELLOW" "todo" "$C_RESET" "$id" "$(migration_title "$id")"
+      label="todo"; color="$C_DIM"
     fi
+
+    printf '  %s%-4s%s  %-*s  %s%s\n' \
+      "$color" "$label" "$C_RESET" "$width" "$id" "$(migration_title "$id")" "$suffix"
   done <<EOF
 $ids
 EOF
@@ -585,6 +603,33 @@ migrations_done_repo() {
 $(migration_pending)
 EOF
   return 0
+}
+
+# Stops at the first repo with anything pending, so repo order decides.
+migrations_show_first_repo() {
+  [ -z "$MIGRATION_TARGET_ID" ] || return 0
+
+  local pending
+  pending="$(migration_pending)"
+  [ -n "$pending" ] || return 0
+
+  MIGRATION_TARGET_ID="${pending%%$'\n'*}"
+  MIGRATION_FOUND=1
+  printf '%s%s%s\n' "$C_BOLD" "$REPO_ID" "$C_RESET"
+  migration_render "$MIGRATION_TARGET_ID"
+}
+
+migrations_done_first_repo() {
+  [ -z "$MIGRATION_TARGET_ID" ] || return 0
+
+  local pending
+  pending="$(migration_pending)"
+  [ -n "$pending" ] || return 0
+
+  MIGRATION_TARGET_ID="${pending%%$'\n'*}"
+  MIGRATION_FOUND=1
+  migration_mark "$MIGRATION_TARGET_ID"
+  step "$REPO_ID: marked $MIGRATION_TARGET_ID done"
 }
 
 migrations_show_repo() {
@@ -670,21 +715,29 @@ cmd_migrations() {
       ;;
     'done')
       MIGRATION_TARGET_ID="${2:-}"
-      if [ -z "$MIGRATION_TARGET_ID" ] && [ "$MIGRATIONS_ALL" -eq 0 ]; then
-        die "usage: $PROGRAM migrations done <id>  (or --all)"
+      if [ -n "$MIGRATION_TARGET_ID" ]; then
+        for_each_repo migrations_done_repo
+        [ "$MIGRATION_FOUND" -eq 1 ] || die "no such migration: $MIGRATION_TARGET_ID"
+      elif [ "$MIGRATIONS_ALL" -eq 1 ]; then
+        for_each_repo migrations_done_repo
+        [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
+      else
+        for_each_repo migrations_done_first_repo
+        [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
       fi
-      for_each_repo migrations_done_repo
-      [ "$MIGRATION_FOUND" -eq 1 ] ||
-        die "no such migration: ${MIGRATION_TARGET_ID:-none pending}"
       ;;
     new)
       migrations_new "${2:-}"
       ;;
     show)
       MIGRATION_TARGET_ID="${2:-}"
-      [ -n "$MIGRATION_TARGET_ID" ] || die "usage: $PROGRAM migrations show <id>"
-      for_each_repo migrations_show_repo
-      [ "$MIGRATION_FOUND" -eq 1 ] || die "no such migration: $MIGRATION_TARGET_ID"
+      if [ -z "$MIGRATION_TARGET_ID" ]; then
+        for_each_repo migrations_show_first_repo
+        [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
+      else
+        for_each_repo migrations_show_repo
+        [ "$MIGRATION_FOUND" -eq 1 ] || die "no such migration: $MIGRATION_TARGET_ID"
+      fi
       ;;
     *)
       die "unknown migrations subcommand: $sub"
@@ -917,7 +970,7 @@ usage: $PROGRAM <command> [options]
 commands:
   install     install declared dependencies, render secrets, link, run hooks
   update      pull each repo, re-apply it, then show any pending migrations
-  migrations  list pending migrations; also \`new <slug>\`, \`done <id>\`, \`show <id>\`
+  migrations  list pending migrations; also \`new <slug>\`, \`done [id]\`, \`show [id]\`
   link        stow the packages of every configured repo
   unlink      unstow them again
   secrets     render templates/ through \`op inject\` only
