@@ -430,6 +430,7 @@ install_repo() {
 MIGRATIONS_QUIT=0
 MIGRATIONS_ALL=0
 MIGRATION_TARGET_ID=""
+MIGRATION_REPO=""
 MIGRATION_FOUND=0
 
 migration_ids() {
@@ -594,6 +595,71 @@ migrations_show_repo() {
   return 0
 }
 
+slugify() {
+  printf '%s' "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//'
+}
+
+# Load one repo: the one named by --repo, else the first configured.
+select_repo() {
+  local want="$1" repo first=""
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    load_repo "$repo"
+    [ -n "$first" ] || first="$repo"
+    if [ -n "$want" ] && [ "$REPO_ID" = "$want" ]; then
+      return 0
+    fi
+  done <<EOF
+$(repo_list)
+EOF
+
+  [ -z "$want" ] || die "no configured repo named '$want'"
+  [ -n "$first" ] || die "no config repos configured in $CONFIG_FILE"
+  load_repo "$first"
+}
+
+migrations_new() {
+  local slug id file title editor
+  slug="$(slugify "${1:-}")"
+  [ -n "$slug" ] || die "usage: $PROGRAM migrations new <slug>"
+
+  select_repo "$MIGRATION_REPO"
+  id="$(date '+%Y%m%d')-$slug"
+  file="$MIGRATIONS_PATH/$id.md"
+  if [ -e "$file" ]; then
+    die "already exists: $file"
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "would create $file"
+    return 0
+  fi
+
+  title="$(printf '%s' "$slug" | tr '-' ' ' |
+    awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')"
+
+  mkdir -p "$MIGRATIONS_PATH"
+  cat >"$file" <<TEMPLATE
+# $title
+
+Why this is needed, in a sentence or two.
+
+    the command to run
+TEMPLATE
+
+  info "created $file"
+  step "mark it done here with: $PROGRAM migrations done $id"
+
+  editor="${VISUAL:-${EDITOR:-}}"
+  if [ "$INTERACTIVE" -eq 1 ] && [ -n "$editor" ]; then
+    # Unquoted so EDITOR can carry flags, e.g. "code -w".
+    # shellcheck disable=SC2086
+    $editor "$file" </dev/tty >/dev/tty 2>&1 || warn "editor exited non-zero"
+  fi
+}
+
 cmd_migrations() {
   local sub="${1:-list}"
 
@@ -610,6 +676,9 @@ cmd_migrations() {
       for_each_repo migrations_done_repo
       [ "$MIGRATION_FOUND" -eq 1 ] ||
         die "no such migration: ${MIGRATION_TARGET_ID:-none pending}"
+      ;;
+    new)
+      migrations_new "${2:-}"
       ;;
     show)
       MIGRATION_TARGET_ID="${2:-}"
@@ -848,7 +917,7 @@ usage: $PROGRAM <command> [options]
 commands:
   install     install declared dependencies, render secrets, link, run hooks
   update      pull each repo, re-apply it, then show any pending migrations
-  migrations  list pending migrations; also \`done <id>\` and \`show <id>\`
+  migrations  list pending migrations; also \`new <slug>\`, \`done <id>\`, \`show <id>\`
   link        stow the packages of every configured repo
   unlink      unstow them again
   secrets     render templates/ through \`op inject\` only
@@ -862,6 +931,7 @@ options:
       --adopt     stow --adopt: pull existing files into the repo (link only)
       --install   doctor only: brew install anything missing
       --all       migrations only: list applied too, or mark every one done
+      --repo ID   migrations new only: which config repo to create it in
 
 environment:
   DOTFILES_CONFIG   config file (default $CONFIG_FILE)
@@ -882,6 +952,9 @@ main() {
       --adopt)      ADOPT=1 ;;
       --install)    DOCTOR_INSTALL=1 ;;
       --all)        MIGRATIONS_ALL=1 ;;
+      --repo)       MIGRATION_REPO="${2:-}"
+                    [ -n "$MIGRATION_REPO" ] || die "--repo needs a repo id"
+                    shift ;;
       -h|--help)    usage; return 0 ;;
       -*)           die "unknown option: $1" ;;
       *)            ARGS[${#ARGS[@]}]="$1" ;;

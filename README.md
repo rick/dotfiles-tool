@@ -141,8 +141,17 @@ links across your home directory.
 ### Migrations
 
 Some changes need a hand on each machine — a new login shell, a stale file to
-delete, a `defaults write`. Drop a markdown note in `migrations/`; the basename
-is its id, and a date prefix keeps them in order.
+delete, a `defaults write`. Write a markdown note for it:
+
+```bash
+dotfiles migrations new "switch the login shell to bash 5"
+# -> migrations/20260915-switch-the-login-shell-to-bash-5.md, opened in $EDITOR
+```
+
+The slug is normalised, the date prefix keeps them in order, and the basename
+is the id. `--repo <id>` picks the config repo when more than one is
+configured; the default is the first. Nothing stops you creating the file by
+hand — the helper only saves you typing the date.
 
 ```markdown
 # Switch the login shell to Homebrew's bash
@@ -160,9 +169,14 @@ so it can say things no script could safely do on its own.
 ```bash
 dotfiles migrations              # pending
 dotfiles migrations --all        # and the ones already done, with dates
+dotfiles migrations new <slug>   # create one, --repo <id> to choose the repo
 dotfiles migrations show <id>
 dotfiles migrations done <id>    # or --all
 ```
+
+A migration you have just written counts as pending on your own machine too,
+since the tool has no idea whether you did the steps before or after writing
+them down. `migrations new` prints the `done` command for exactly that.
 
 Acknowledgements live in `~/.local/share/dotfiles/<repo>/migrations.applied`,
 one `id<TAB>timestamp` per line, per machine. It is plain text on purpose: did
