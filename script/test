@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# Run the test suite against every bash the tool claims to support, so a
+# bash-4-ism cannot pass unnoticed on a machine whose `bash` is modern.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+command -v bats >/dev/null 2>&1 || {
+  printf 'bats is not installed. Run: brew install bats-core\n' >&2
+  exit 1
+}
+
+BASHES=()
+for candidate in /bin/bash "$(command -v bash)"; do
+  [ -x "$candidate" ] || continue
+  case " ${BASHES[*]-} " in *" $candidate "*) continue ;; esac
+  BASHES[${#BASHES[@]}]="$candidate"
+done
+
+rc=0
+for b in "${BASHES[@]}"; do
+  # shellcheck disable=SC2016  # must expand in the child bash, not this one
+  printf '\n=== bash %s (%s) ===\n' "$("$b" -c 'printf %s "$BASH_VERSION"')" "$b"
+  DOTFILES_TEST_BASH="$b" bats "$@" test || rc=1
+done
+
+exit $rc

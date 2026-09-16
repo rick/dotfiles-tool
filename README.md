@@ -43,6 +43,27 @@ dotfiles link --adopt     # pull pre-existing files into the config repo
 dotfiles unlink
 ```
 
+## Tests
+
+```bash
+brew install bats-core
+script/test                 # every supported bash
+bats test                   # just this machine's bash
+bats test/migrations.bats   # one file
+```
+
+`script/test` runs the suite once per bash on `PATH` *and* once under
+`/bin/bash`, because the tool targets 3.2 and a bash-4-ism would otherwise pass
+unnoticed on a machine with a modern bash. CI runs on macOS for the same
+reason — a Linux runner has no 3.2 to test against.
+
+The tests drive `bin/dotfiles` as a subprocess against throwaway config repos
+in a temp directory, with `DOTFILES_REPOS`/`DOTFILES_STATE` pointed at them, so
+nothing touches the machine's real dotfiles. `test/helper.bash` builds the
+fixtures; `test/support/ptyrun.py` drives the interactive prompts on a real pty
+(`script -q` will not do — it closes stdin, so the child reads EOF instead of
+the keystroke).
+
 ## Anatomy of a config repo
 
 ```
