@@ -19,7 +19,13 @@ VERSION="0.2.0"
 
 CONFIG_FILE="${DOTFILES_CONFIG:-$XDG_CONFIG_HOME/dotfiles/config}"
 STATE_DIR="${DOTFILES_STATE:-$XDG_DATA_HOME/dotfiles}"
-HOST="$(hostname -s)"
+# Not hostname -s: with HostName unset it follows reverse DNS, which a VPN can answer.
+if [ "$(uname)" = "Darwin" ]; then
+  HOST="$(scutil --get ComputerName 2>/dev/null || true)"
+  [ -n "$HOST" ] || HOST="$(hostname -s)"
+else
+  HOST="$(hostname -s)"
+fi
 
 DRY_RUN=0
 ADOPT=0
