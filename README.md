@@ -59,9 +59,6 @@ dotfiles install -n
 # Bring a file that already exists in $HOME under management
 dotfiles adopt llm ~/.claude/CLAUDE.md
 
-# Adopt everything a package already declares, in bulk
-dotfiles link --adopt
-
 # Re-render secrets after editing a template or rotating an item
 dotfiles secrets
 
