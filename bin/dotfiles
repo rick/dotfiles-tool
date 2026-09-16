@@ -121,7 +121,9 @@ load_repo() {
   MIGRATIONS_STATE="$STATE_DIR/$REPO_ID/migrations.applied"
 
   # An unset PACKAGES means "everything under packages/".
+  PACKAGES_EXPLICIT=1
   if [ ${#PACKAGES[@]} -eq 0 ] && [ -d "$PACKAGES_PATH" ]; then
+    PACKAGES_EXPLICIT=0
     local d
     for d in "$PACKAGES_PATH"/*/; do
       [ -d "$d" ] || continue
@@ -298,6 +300,65 @@ unlink_repo() {
   if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
     run_stow "$SECRETS_PATH" --delete "$SECRETS_PACKAGE"
   fi
+}
+
+# ---------------------------------------------------------------- adopt ----
+
+# Warn when the package will not be linked anywhere else. A repo that names its
+# packages will silently ignore a new directory, and nothing else reports that.
+adopt_check_packages() {
+  local pkg="$1" p
+  [ "$PACKAGES_EXPLICIT" -eq 1 ] || return 0
+  for p in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
+    [ "$p" != "$pkg" ] || return 0
+  done
+  warn "PACKAGES in $REPO/dotfiles.conf does not list '$pkg', so it will not link on other machines"
+  step "add it there: PACKAGES=(... $pkg)"
+}
+
+# Move files from $TARGET into a package and link them back. stow --adopt
+# cannot do this on its own: it only adopts paths the package already declares.
+adopt_repo() {
+  local pkg="$1"
+  shift
+
+  case "$pkg" in
+    '' | */*) die "not a package name: '$pkg'" ;;
+  esac
+
+  local root src abs rel dest moved=0
+  root="$(abspath "$TARGET")"
+
+  for src in "$@"; do
+    if [ -L "$src" ]; then
+      die "already a symlink, nothing to adopt: $src"
+    fi
+    if [ -d "$src" ]; then
+      die "only regular files can be adopted: $src"
+    fi
+    [ -f "$src" ] || die "no such file: $src"
+
+    abs="$(abspath "$src")"
+    rel="${abs#"$root/"}"
+    [ "$rel" != "$abs" ] || die "not under $TARGET: $src"
+
+    dest="$PACKAGES_PATH/$pkg/$rel"
+    [ ! -e "$dest" ] || die "already in the '$pkg' package: $dest"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "would adopt $rel into $REPO_ID/$pkg"
+      continue
+    fi
+
+    mkdir -p "${dest%/*}"
+    mv "$abs" "$dest"
+    info "adopted $rel into $REPO_ID/$pkg"
+    moved=1
+  done
+
+  [ "$moved" -eq 0 ] || run_stow "$PACKAGES_PATH" --stow "$pkg"
+  adopt_check_packages "$pkg"
+  return "$REPO_STOP"
 }
 
 # --------------------------------------------------------------- secrets ----
@@ -962,6 +1023,7 @@ commands:
   update      pull each repo, re-apply it, then show any pending migrations
   migrations  list pending migrations; also \`new <slug>\`, \`done [id]\`, \`show [id]\`
               \`--all\` on either listing shows the whole timeline
+  adopt       move files from \$HOME into a package and link them back
   link        stow the packages of every configured repo
   unlink      unstow them again
   secrets     render templates/ through \`op inject\` only
@@ -1008,6 +1070,13 @@ main() {
 
   case "$cmd" in
     install)  need_cmd stow; for_each_repo install_repo; info "done" ;;
+    adopt)
+      need_cmd stow
+      if [ ${#ARGS[@]} -lt 2 ]; then
+        die "usage: $PROGRAM adopt <package> <path>..."
+      fi
+      for_each_repo adopt_repo ${ARGS[@]+"${ARGS[@]}"}
+      ;;
     update)   cmd_update ;;
     migrations) cmd_migrations ${ARGS[@]+"${ARGS[@]}"} ;;
     link)     need_cmd stow; for_each_repo link_repo; info "done" ;;

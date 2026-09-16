@@ -40,6 +40,7 @@ dotfiles update             # git pull each repo, re-apply, show pending migrati
 dotfiles status             # what is configured, what is actually linked
 dotfiles doctor             # check dependencies and configuration
 dotfiles doctor --install   # ...and brew install whatever is missing
+dotfiles adopt <pkg> <path> # move a file from $HOME into a package, link it back
 dotfiles link               # stow only
 dotfiles unlink             # unstow
 dotfiles secrets            # render templates/ only
@@ -55,7 +56,10 @@ Global options: `-n`/`--dry-run` (change nothing), `-v`/`--verbose`, and
 # See what a command would do first
 dotfiles install -n
 
-# Adopt files already in $HOME into the config repo, rather than clobbering them
+# Bring a file that already exists in $HOME under management
+dotfiles adopt llm ~/.claude/CLAUDE.md
+
+# Adopt everything a package already declares, in bulk
 dotfiles link --adopt
 
 # Re-render secrets after editing a template or rotating an item
@@ -256,6 +260,28 @@ still look new.
 
 Steps *every* machine needs belong in this README or `hooks/post-install`, not
 only in a migration. The login shell above is genuinely both.
+
+### Adopting existing files
+
+`dotfiles adopt <package> <path>...` moves a file out of `$HOME` into a package
+and links it back, so an existing config comes under management without being
+retyped:
+
+```bash
+dotfiles adopt llm ~/.claude/CLAUDE.md
+# -> packages/llm/.claude/CLAUDE.md, with ~/.claude/CLAUDE.md now a symlink
+```
+
+The package is created if it does not exist, and `--repo <id>` chooses the
+config repo. It refuses rather than guess: a path outside `TARGET`, a symlink,
+a directory, or a name already present in the package.
+
+`stow --adopt` (via `dotfiles link --adopt`) does a different job — it adopts
+files the package *already declares*, and silently ignores anything else.
+
+If `dotfiles.conf` lists `PACKAGES` explicitly, adopting into a new package
+warns: the directory exists and is linked here, but nothing will link it on
+another machine until the name is added to that list.
 
 ### Layering several repos
 
