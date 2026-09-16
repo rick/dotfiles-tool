@@ -29,6 +29,7 @@ fi
 
 DRY_RUN=0
 ADOPT=0
+SKIP_TOOL=0
 VERBOSE=0
 TMPDIRS=""
 ONLY_REPO=""
@@ -790,6 +791,68 @@ cmd_migrations() {
   esac
 }
 
+# ----------------------------------------------------------- self-update ----
+
+# The tool's own checkout. $0 is usually a symlink on PATH, and bash 3.2 has no
+# readlink -f. DOTFILES_TOOL_REPO overrides it; set it empty to opt out.
+tool_repo() {
+  if [ -n "${DOTFILES_TOOL_REPO+x}" ]; then
+    printf '%s\n' "$DOTFILES_TOOL_REPO"
+    return 0
+  fi
+  local src="$0" dir
+  while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)" || return 1
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  (cd -P "$(dirname "$src")/.." && pwd)
+}
+
+update_self() {
+  local root before after
+  root="$(tool_repo 2>/dev/null || true)"
+  if [ -z "$root" ] || [ ! -d "$root/.git" ]; then
+    debug "$PROGRAM is not a git checkout; skipping self-update"
+    return 0
+  fi
+
+  # Unlike a config repo, this one is not pulled with --autostash: rebasing a
+  # half-finished edit to the tool underneath the run that is using it is not a
+  # trade worth making.
+  if [ -n "$(git -C "$root" status --porcelain 2>/dev/null || true)" ]; then
+    warn "$PROGRAM has uncommitted changes; not updating itself"
+    return 0
+  fi
+
+  if ! git -C "$root" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+    warn "$PROGRAM is on a branch with no upstream; not updating itself"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "updating $PROGRAM ($root)"
+    step "would git pull --rebase"
+    return 0
+  fi
+
+  info "updating $PROGRAM ($root)"
+  step "git pull --rebase"
+  before="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  if ! git -C "$root" pull --rebase --quiet; then
+    warn "pull failed for $PROGRAM; carrying on with the version already here"
+    return 0
+  fi
+  after="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  [ "$before" != "$after" ] || return 0
+
+  # Bash reads a script as it runs, so carrying on in place after the file
+  # changed underneath would splice old and new. --skip-tool stops the fresh
+  # process from looping back here.
+  info "$PROGRAM updated; restarting"
+  exec "${BASH:-bash}" "$0" ${SELF_ARGV[@]+"${SELF_ARGV[@]}"} --skip-tool
+}
+
 # ---------------------------------------------------------------- update ----
 
 update_git_repo() {
@@ -837,6 +900,7 @@ update_repo() {
 cmd_update() {
   need_cmd stow
   need_cmd git
+  [ "$SKIP_TOOL" -eq 1 ] || update_self
   for_each_repo update_repo
   if [ "$UPDATE_RC" -ne 0 ]; then
     warn "some repos were not updated"
@@ -1041,6 +1105,7 @@ options:
   -n, --dry-run   show what would happen, change nothing
   -v, --verbose   pass --verbose to stow, print more
       --adopt     stow --adopt: pull existing files into the repo (link only)
+      --skip-tool do not pull the tool's own checkout (update only)
       --install   doctor only: brew install anything missing
       --all       migrations only: list applied too, or mark every one done
       --repo ID   act on only this config repo
@@ -1049,6 +1114,7 @@ environment:
   DOTFILES_CONFIG   config file (default $CONFIG_FILE)
   DOTFILES_STATE    state dir for secrets and migration state (default $STATE_DIR)
   DOTFILES_REPOS    colon-separated repo list, overrides the config file
+  DOTFILES_TOOL_REPO  the tool's own checkout (default: alongside this script)
 EOF
 }
 
@@ -1062,6 +1128,7 @@ main() {
       -n|--dry-run) DRY_RUN=1 ;;
       -v|--verbose) VERBOSE=1 ;;
       --adopt)      ADOPT=1 ;;
+      --skip-tool)  SKIP_TOOL=1 ;;
       --install)    DOCTOR_INSTALL=1 ;;
       --all)        MIGRATIONS_ALL=1 ;;
       --repo)       ONLY_REPO="${2:-}"
@@ -1096,4 +1163,5 @@ main() {
   esac
 }
 
+SELF_ARGV=("$@")
 main "$@"

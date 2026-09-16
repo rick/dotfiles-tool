@@ -16,6 +16,9 @@ setup() {
   TARGET="$SANDBOX/target"
   mkdir -p "$STATE" "$TARGET"
   export DOTFILES_STATE="$STATE"
+  # The tool under test is this checkout. Empty opts out of self-update, so no
+  # test pulls the repo it is running from; selfupdate.bats points it elsewhere.
+  export DOTFILES_TOOL_REPO=""
 }
 
 teardown() {
