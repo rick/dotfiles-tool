@@ -70,13 +70,32 @@ three() { use_repos "$(make_repo one 20260101-alpha 20260202-beta 20260303-gamma
   assert_contains "Body of 20260101-alpha"
 }
 
-@test "show --all renders every pending one" {
+@test "show --all is the timeline, not a wall of bodies" {
   three
+  dotfiles migrations done 20260101-alpha
   dotfiles migrations show --all
   assert_success
-  assert_contains "Body of 20260101-alpha"
+  assert_contains "done  20260101-alpha"
+  assert_contains "next  20260202-beta"
+  assert_contains "todo  20260303-gamma"
+  refute_contains "Body of 20260202-beta"
+}
+
+@test "show --all matches plain --all" {
+  three
+  dotfiles migrations done 20260101-alpha
+  local via_show; via_show="$(plain_output)"
+  dotfiles migrations show --all
+  local a; a="$(plain_output)"
+  dotfiles migrations --all
+  assert_equal "$a" "$(plain_output)"
+}
+
+@test "show --all with an explicit id still renders that one" {
+  three
+  dotfiles migrations show --all 20260202-beta
+  assert_success
   assert_contains "Body of 20260202-beta"
-  assert_contains "Body of 20260303-gamma"
 }
 
 @test "show of an unknown id fails" {

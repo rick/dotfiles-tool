@@ -695,17 +695,26 @@ TEMPLATE
   fi
 }
 
+migrations_list() {
+  for_each_repo migrations_list_repo
+  [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
+}
+
 cmd_migrations() {
   local sub="${1:-list}"
 
   case "$sub" in
     list)
-      for_each_repo migrations_list_repo
-      [ "$MIGRATION_FOUND" -eq 1 ] || info "no pending migrations"
+      migrations_list
       ;;
     'done'|show)
       MIGRATION_ACTION="$sub"
       MIGRATION_TARGET_ID="${2:-}"
+      if [ "$sub" = show ] && [ "$MIGRATIONS_ALL" -eq 1 ] &&
+         [ -z "$MIGRATION_TARGET_ID" ]; then
+        migrations_list
+        return 0
+      fi
       for_each_repo migrations_act_repo
       if [ "$MIGRATION_FOUND" -eq 0 ]; then
         [ -z "$MIGRATION_TARGET_ID" ] || die "no such migration: $MIGRATION_TARGET_ID"
@@ -948,6 +957,7 @@ commands:
   install     install declared dependencies, render secrets, link, run hooks
   update      pull each repo, re-apply it, then show any pending migrations
   migrations  list pending migrations; also \`new <slug>\`, \`done [id]\`, \`show [id]\`
+              \`--all\` on either listing shows the whole timeline
   link        stow the packages of every configured repo
   unlink      unstow them again
   secrets     render templates/ through \`op inject\` only
