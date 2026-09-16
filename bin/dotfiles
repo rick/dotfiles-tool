@@ -25,6 +25,10 @@ DRY_RUN=0
 ADOPT=0
 VERBOSE=0
 TMPDIRS=""
+ONLY_REPO=""
+
+# A callee returns this to say "handled, stop iterating".
+REPO_STOP=10
 
 if [ -t 0 ] && [ -t 1 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
 
@@ -127,24 +131,38 @@ load_repo() {
   fi
 }
 
-# Run a function once per configured repo, with that repo's config loaded.
+# Run a function once per configured repo, with that repo's config loaded and
+# any extra arguments passed through. --repo narrows the set. A callee that
+# returns REPO_STOP ends the loop; any other failure propagates.
 for_each_repo() {
   local fn="$1"
-  local repo
-  local found=0
-  local repos
+  shift
+  local repo found=0 rc repos
   repos="$(repo_list)"
 
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
+    if [ -n "$ONLY_REPO" ] && [ "$(basename "$repo")" != "$ONLY_REPO" ]; then
+      continue
+    fi
     found=1
     load_repo "$repo"
-    "$fn"
+    rc=0
+    "$fn" "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$rc" -eq "$REPO_STOP" ]; then
+        return 0
+      fi
+      return "$rc"
+    fi
   done <<EOF
 $repos
 EOF
 
-  [ "$found" -eq 1 ] || die "no config repos configured in $CONFIG_FILE"
+  if [ "$found" -eq 0 ]; then
+    [ -z "$ONLY_REPO" ] || die "no configured repo named '$ONLY_REPO'"
+    die "no config repos configured in $CONFIG_FILE"
+  fi
 }
 
 # ---------------------------------------------------------- dependencies ----
@@ -437,12 +455,8 @@ install_repo() {
 
 # A migration is a markdown note in a repo's migrations/, named by its id. The
 # engine only ever prints one and records that you said you had dealt with it.
-MIGRATIONS_QUIT=0
 MIGRATIONS_ACK_ALL=0
 MIGRATIONS_ALL=0
-MIGRATION_ACTION=""
-MIGRATION_TARGET_ID=""
-MIGRATION_REPO=""
 MIGRATION_FOUND=0
 
 migration_ids() {
@@ -509,8 +523,7 @@ EOF
 }
 
 migrations_repo() {
-  local pending id reply count
-  [ "$MIGRATIONS_QUIT" -eq 0 ] || return 0
+  local pending id reply count quit=0
   pending="$(migration_pending)"
   [ -n "$pending" ] || return 0
 
@@ -519,7 +532,7 @@ migrations_repo() {
 
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    [ "$MIGRATIONS_QUIT" -eq 0 ] || break
+    [ "$quit" -eq 0 ] || break
     migration_render "$id"
 
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -538,15 +551,16 @@ migrations_repo() {
     case "$reply" in
       y|Y) migration_mark "$id"; step "marked $id done" ;;
       a|A) MIGRATIONS_ACK_ALL=1; migration_mark "$id"; step "marked $id done" ;;
-      q|Q) MIGRATIONS_QUIT=1 ;;
+      q|Q) quit=1 ;;
     esac
   done <<EOF
 $pending
 EOF
 
-  if [ "$INTERACTIVE" -eq 0 ] || [ "$MIGRATIONS_QUIT" -eq 1 ]; then
+  if [ "$INTERACTIVE" -eq 0 ] || [ "$quit" -eq 1 ]; then
     step "mark them done with: $PROGRAM migrations done <id>"
   fi
+  [ "$quit" -eq 0 ] || return "$REPO_STOP"
   return 0
 }
 
@@ -598,11 +612,11 @@ EOF
 }
 
 migrations_act_repo() {
-  local id ids
+  local action="$1" want="$2" id ids
 
-  if [ -n "$MIGRATION_TARGET_ID" ]; then
-    [ -f "$MIGRATIONS_PATH/$MIGRATION_TARGET_ID.md" ] || return 0
-    ids="$MIGRATION_TARGET_ID"
+  if [ -n "$want" ]; then
+    [ -f "$MIGRATIONS_PATH/$want.md" ] || return 0
+    ids="$want"
   else
     # Without --all only the first pending one anywhere is acted on.
     [ "$MIGRATIONS_ALL" -eq 1 ] || [ "$MIGRATION_FOUND" -eq 0 ] || return 0
@@ -614,7 +628,7 @@ migrations_act_repo() {
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     MIGRATION_FOUND=1
-    if [ "$MIGRATION_ACTION" = show ]; then
+    if [ "$action" = show ]; then
       repo_header
       migration_render "$id"
     elif migration_applied "$id"; then
@@ -635,32 +649,10 @@ slugify() {
     sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//'
 }
 
-# Load one repo: the one named by --repo, else the first configured.
-# REPO_ID is the basename, so matching needs no dotfiles.conf sourced.
-select_repo() {
-  local want="$1" repo first=""
-  while IFS= read -r repo; do
-    [ -n "$repo" ] || continue
-    [ -n "$first" ] || first="$repo"
-    if [ -n "$want" ] && [ "$(basename "$repo")" = "$want" ]; then
-      load_repo "$repo"
-      return 0
-    fi
-  done <<EOF
-$(repo_list)
-EOF
-
-  [ -z "$want" ] || die "no configured repo named '$want'"
-  [ -n "$first" ] || die "no config repos configured in $CONFIG_FILE"
-  load_repo "$first"
-}
-
-migrations_new() {
-  local slug id file title editor
-  slug="$(slugify "${1:-}")"
-  [ -n "$slug" ] || die "usage: $PROGRAM migrations new <slug>"
-
-  select_repo "$MIGRATION_REPO"
+# Creates the note in the first repo it is handed, so --repo picks the repo
+# and the bare form takes the first configured one.
+migrations_new_repo() {
+  local slug="$1" id file title editor
   id="$(date '+%Y%m%d')-$slug"
   file="$MIGRATIONS_PATH/$id.md"
   if [ -e "$file" ]; then
@@ -669,7 +661,7 @@ migrations_new() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     info "would create $file"
-    return 0
+    return "$REPO_STOP"
   fi
 
   title="$(printf '%s' "$slug" | tr '-' ' ' |
@@ -693,6 +685,7 @@ TEMPLATE
     # shellcheck disable=SC2086
     $editor "$file" </dev/tty >/dev/tty 2>&1 || warn "editor exited non-zero"
   fi
+  return "$REPO_STOP"
 }
 
 migrations_list() {
@@ -701,28 +694,28 @@ migrations_list() {
 }
 
 cmd_migrations() {
-  local sub="${1:-list}"
+  local sub="${1:-list}" want slug
 
   case "$sub" in
     list)
       migrations_list
       ;;
     'done'|show)
-      MIGRATION_ACTION="$sub"
-      MIGRATION_TARGET_ID="${2:-}"
-      if [ "$sub" = show ] && [ "$MIGRATIONS_ALL" -eq 1 ] &&
-         [ -z "$MIGRATION_TARGET_ID" ]; then
+      want="${2:-}"
+      if [ "$sub" = show ] && [ "$MIGRATIONS_ALL" -eq 1 ] && [ -z "$want" ]; then
         migrations_list
         return 0
       fi
-      for_each_repo migrations_act_repo
+      for_each_repo migrations_act_repo "$sub" "$want"
       if [ "$MIGRATION_FOUND" -eq 0 ]; then
-        [ -z "$MIGRATION_TARGET_ID" ] || die "no such migration: $MIGRATION_TARGET_ID"
+        [ -z "$want" ] || die "no such migration: $want"
         info "no pending migrations"
       fi
       ;;
     new)
-      migrations_new "${2:-}"
+      slug="$(slugify "${2:-}")"
+      [ -n "$slug" ] || die "usage: $PROGRAM migrations new <slug>"
+      for_each_repo migrations_new_repo "$slug"
       ;;
     *)
       die "unknown migrations subcommand: $sub"
@@ -759,9 +752,16 @@ update_git_repo() {
   return 0
 }
 
+# Accumulated by update_repo: a repo that cannot be pulled is skipped rather
+# than fatal, but `update` must not then claim success.
+UPDATE_RC=0
+
 update_repo() {
   info "updating $REPO_ID ($REPO)"
-  update_git_repo || return 0
+  if ! update_git_repo; then
+    UPDATE_RC=1
+    return 0
+  fi
   apply_repo
   mark_installed
   migrations_repo
@@ -771,6 +771,10 @@ cmd_update() {
   need_cmd stow
   need_cmd git
   for_each_repo update_repo
+  if [ "$UPDATE_RC" -ne 0 ]; then
+    warn "some repos were not updated"
+    return 1
+  fi
   info "done"
 }
 
@@ -869,8 +873,8 @@ check_cmd() {
   return 1
 }
 
-# Set by doctor_deps_repo, which runs through for_each_repo and so cannot
-# usefully return a status of its own.
+# Accumulated rather than returned: a failing repo must not stop the others
+# from being checked.
 DOCTOR_RC=0
 
 doctor_deps_repo() {
@@ -971,7 +975,7 @@ options:
       --adopt     stow --adopt: pull existing files into the repo (link only)
       --install   doctor only: brew install anything missing
       --all       migrations only: list applied too, or mark every one done
-      --repo ID   migrations new only: which config repo to create it in
+      --repo ID   act on only this config repo
 
 environment:
   DOTFILES_CONFIG   config file (default $CONFIG_FILE)
@@ -992,8 +996,8 @@ main() {
       --adopt)      ADOPT=1 ;;
       --install)    DOCTOR_INSTALL=1 ;;
       --all)        MIGRATIONS_ALL=1 ;;
-      --repo)       MIGRATION_REPO="${2:-}"
-                    [ -n "$MIGRATION_REPO" ] || die "--repo needs a repo id"
+      --repo)       ONLY_REPO="${2:-}"
+                    [ -n "$ONLY_REPO" ] || die "--repo needs a repo id"
                     shift ;;
       -h|--help)    usage; return 0 ;;
       -*)           die "unknown option: $1" ;;

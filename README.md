@@ -46,7 +46,8 @@ dotfiles secrets            # render templates/ only
 dotfiles migrations         # notes still to act on by hand
 ```
 
-Global options: `-n`/`--dry-run` (change nothing), `-v`/`--verbose`.
+Global options: `-n`/`--dry-run` (change nothing), `-v`/`--verbose`, and
+`--repo <id>` to act on one config repo instead of all of them.
 
 ### Common tasks
 
@@ -59,6 +60,9 @@ dotfiles link --adopt
 
 # Re-render secrets after editing a template or rotating an item
 dotfiles secrets
+
+# Work on one repo only -- handy when another has a slow or unreachable remote
+dotfiles update --repo dotfiles-work
 
 # Work through the notes waiting on this machine
 dotfiles migrations             # what is outstanding
@@ -193,8 +197,8 @@ dotfiles migrations new "switch the login shell to bash 5"
 ```
 
 The slug is normalised and the date prefix keeps them in order; the basename is
-the id. `--repo <id>` picks the config repo when several are configured,
-defaulting to the first. Writing the file by hand works just as well.
+the id. The note lands in the first configured repo unless `--repo <id>` says
+otherwise. Writing the file by hand works just as well.
 
 ```markdown
 # Switch the login shell to Homebrew's bash
@@ -217,7 +221,7 @@ dotfiles migrations show <id>    # read a specific one
 dotfiles migrations done         # mark the next pending one done
 dotfiles migrations done <id>    # mark a specific one
 dotfiles migrations done --all   # mark every pending one
-dotfiles migrations new <slug>   # write one, --repo <id> to choose the repo
+dotfiles migrations new <slug>   # write one, --repo <id> to pick the repo
 ```
 
 `--all` is the summary — everything in id order, one line each, the earliest

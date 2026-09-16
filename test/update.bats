@@ -49,13 +49,30 @@ load helper
   assert_contains "unpushed commit(s)"
 }
 
-@test "a failed pull warns and does not abort the run" {
+@test "a failed pull warns and exits non-zero" {
   local clone; clone="$(make_git_repo app)"
   use_repos "$clone"
   git -C "$clone" remote set-url origin /nonexistent/repo.git
   dotfiles update
-  assert_success
+  assert_failure
   assert_contains "pull failed"
+  assert_contains "some repos were not updated"
+}
+
+@test "a failed pull does not stop the other repos being applied" {
+  local broken; broken="$(make_git_repo app)"
+  git -C "$broken" remote set-url origin /nonexistent/repo.git
+  use_repos "$broken" "$(make_repo other)"
+  dotfiles update
+  assert_failure
+  [ -L "$SANDBOX/target-other/.otherrc" ]
+}
+
+@test "a clean update exits zero" {
+  use_repos "$(make_git_repo app)"
+  dotfiles update
+  assert_success
+  assert_contains "done"
 }
 
 @test "a non-git config repo warns and still links" {
