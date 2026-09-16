@@ -249,9 +249,3 @@ Single-file configs need an escape hatch instead. The usual one:
 ```
 
 and let the private repo own `~/.gitconfig.local`.
-
-## Later: a Homebrew tap
-
-`Formula/dotfiles.rb` is ready to drop into a tap once the interface settles.
-Until then a symlink onto `PATH` avoids having to tag a release for every
-tweak.
