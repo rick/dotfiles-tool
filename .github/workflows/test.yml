@@ -1,0 +1,16 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # macOS so /bin/bash is still 3.2 -- the version the tool targets and the
+    # one a Linux runner cannot give us.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install bats-core stow
+      - run: script/test
