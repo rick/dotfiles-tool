@@ -42,13 +42,64 @@ load helper
   [ -L "$SANDBOX/target-one/.a" ] && [ -L "$SANDBOX/target-one/.b" ]
 }
 
-@test "warns when PACKAGES is explicit and omits the package" {
+@test "adds the package to an explicit PACKAGES" {
   use_repos "$(make_repo one)"   # make_repo writes PACKAGES=(demo)
+  printf 'x\n' > "$SANDBOX/target-one/.thing"
+  dotfiles adopt llm "$SANDBOX/target-one/.thing"
+  assert_success
+  assert_contains "added 'llm' to PACKAGES"
+  run grep -c '^PACKAGES=(demo llm)$' "$SANDBOX/one/dotfiles.conf"
+  assert_equal "$output" "1"
+}
+
+@test "keeps a trailing comment when adding to PACKAGES" {
+  local repo
+  repo="$(make_repo one)"
+  sed -i '' 's/^PACKAGES=(demo)$/PACKAGES=(demo)  # stowed in order/' "$repo/dotfiles.conf"
+  use_repos "$repo"
+  printf 'x\n' > "$SANDBOX/target-one/.thing"
+  dotfiles adopt llm "$SANDBOX/target-one/.thing"
+  assert_success
+  run grep -c '^PACKAGES=(demo llm)  # stowed in order$' "$repo/dotfiles.conf"
+  assert_equal "$output" "1"
+}
+
+@test "warns instead of editing a PACKAGES it cannot safely rewrite" {
+  local repo
+  repo="$(make_repo one)"
+  printf 'PACKAGES=(demo)\n' >> "$repo/dotfiles.conf"
+  use_repos "$repo"
   printf 'x\n' > "$SANDBOX/target-one/.thing"
   dotfiles adopt llm "$SANDBOX/target-one/.thing"
   assert_success
   assert_contains "does not list 'llm'"
   assert_contains "PACKAGES=(... llm)"
+  refute_contains "added"
+}
+
+@test "-n does not edit PACKAGES" {
+  use_repos "$(make_repo one)"
+  printf 'x\n' > "$SANDBOX/target-one/.thing"
+  dotfiles adopt llm "$SANDBOX/target-one/.thing" -n
+  assert_success
+  assert_contains "would add 'llm' to PACKAGES"
+  run grep -c '^PACKAGES=(demo)$' "$SANDBOX/one/dotfiles.conf"
+  assert_equal "$output" "1"
+}
+
+@test "an empty PACKAGES is left alone, since it means every package" {
+  local repo
+  repo="$(make_repo one)"
+  sed -i '' 's/^PACKAGES=(demo)$/PACKAGES=()/' "$repo/dotfiles.conf"
+  rm -rf "$repo/packages"
+  use_repos "$repo"
+  printf 'x\n' > "$SANDBOX/target-one/.thing"
+  dotfiles adopt llm "$SANDBOX/target-one/.thing"
+  assert_success
+  refute_contains "does not list"
+  refute_contains "added"
+  run grep -c '^PACKAGES=()$' "$repo/dotfiles.conf"
+  assert_equal "$output" "1"
 }
 
 @test "no warning when the package is already listed" {

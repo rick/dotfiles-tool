@@ -277,8 +277,10 @@ a directory, or a name already present in the package.
 files the package *already declares*, and silently ignores anything else.
 
 If `dotfiles.conf` lists `PACKAGES` explicitly, adopting into a new package
-warns: the directory exists and is linked here, but nothing will link it on
-another machine until the name is added to that list.
+appends its name to that list, so other machines link it too. This only happens
+when there is exactly one single-line `PACKAGES=(...)` at the start of a line;
+anything more elaborate is left untouched and adopt warns instead. An empty or
+unset `PACKAGES` already means every package, so it is never edited.
 
 ### Layering several repos
 

@@ -129,7 +129,7 @@ load_repo() {
 
   # An unset PACKAGES means "everything under packages/".
   PACKAGES_EXPLICIT=1
-  if [ ${#PACKAGES[@]} -eq 0 ] && [ -d "$PACKAGES_PATH" ]; then
+  if [ ${#PACKAGES[@]} -eq 0 ]; then
     PACKAGES_EXPLICIT=0
     local d
     for d in "$PACKAGES_PATH"/*/; do
@@ -311,15 +311,31 @@ unlink_repo() {
 
 # ---------------------------------------------------------------- adopt ----
 
-# Warn when the package will not be linked anywhere else. A repo that names its
-# packages will silently ignore a new directory, and nothing else reports that.
+# A repo that names its packages silently ignores a new directory, so add the
+# package to PACKAGES, or warn when dotfiles.conf is too clever to edit safely.
 adopt_check_packages() {
-  local pkg="$1" p
+  local pkg="$1" p conf="$REPO/dotfiles.conf" edited
   [ "$PACKAGES_EXPLICIT" -eq 1 ] || return 0
   for p in ${PACKAGES[@]+"${PACKAGES[@]}"}; do
     [ "$p" != "$pkg" ] || return 0
   done
-  warn "PACKAGES in $REPO/dotfiles.conf does not list '$pkg', so it will not link on other machines"
+
+  if [ -f "$conf" ] && [ "$(grep -c '^PACKAGES=([^)]*)' "$conf")" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "would add '$pkg' to PACKAGES in $conf"
+      return 0
+    fi
+    edited="$(awk -v pkg="$pkg" '
+      /^PACKAGES=\([^)]*\)/ { sub(/[ \t]*\)/, " " pkg ")") }
+      { print }
+    ' "$conf")"
+    printf '%s\n' "$edited" >"$conf"
+    PACKAGES[${#PACKAGES[@]}]="$pkg"
+    info "added '$pkg' to PACKAGES in $conf"
+    return 0
+  fi
+
+  warn "PACKAGES in $conf does not list '$pkg', so it will not link on other machines"
   step "add it there: PACKAGES=(... $pkg)"
 }
 
