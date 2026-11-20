@@ -109,6 +109,7 @@ load_repo() {
   TEMPLATES_DIR="templates"
   MIGRATIONS_DIR="migrations"
   SECRETS_PACKAGE="private"
+  SECRETS=1
   TARGET="$HOME"
 
   if [ -f "$REPO/dotfiles.conf" ]; then
@@ -289,7 +290,9 @@ link_repo() {
     run_stow "$PACKAGES_PATH" --stow "${PACKAGES[@]}"
   fi
 
-  if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
+  if [ "$SECRETS" = 0 ]; then
+    debug "secrets are off for $REPO_ID"
+  elif [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then
     step "secrets: $SECRETS_PATH/$SECRETS_PACKAGE"
     run_stow "$SECRETS_PATH" --stow "$SECRETS_PACKAGE"
   elif [ -d "$TEMPLATES_PATH" ]; then
@@ -413,6 +416,10 @@ check_templates() {
 # must never reach the state dir: stow symlinks point at it, and a partial
 # swap would leave those links dangling.
 secrets_repo() {
+  if [ "$SECRETS" = 0 ]; then
+    debug "secrets are off for $REPO_ID, skipping"
+    return 0
+  fi
   if [ ! -d "$TEMPLATES_PATH" ]; then
     debug "$REPO_ID has no $TEMPLATES_DIR/, skipping"
     return 0
@@ -975,7 +982,9 @@ status_repo() {
   done
 
   # The rendered secrets are a package too, so report them the same way.
-  if [ -d "$TEMPLATES_PATH" ]; then
+  if [ "$SECRETS" = 0 ]; then
+    printf '  %-14s off (SECRETS=0)\n' "secrets"
+  elif [ -d "$TEMPLATES_PATH" ]; then
     local n
     n="$(template_files | tr -dc '\0' | wc -c | tr -d ' ')"
     if [ -d "$SECRETS_PATH/$SECRETS_PACKAGE" ]; then

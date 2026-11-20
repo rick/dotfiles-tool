@@ -121,6 +121,7 @@ Sourced as bash, so it can branch on `$HOST`, `$(uname)`, or anything else.
 | `OP_VAULT` | *(empty)* | exported to templates as `$OP_VAULT` |
 | `OP_ACCOUNT` | *(empty)* | which 1Password account to resolve against |
 | `TARGET` | `$HOME` | where to link |
+| `SECRETS` | `1` | `0` renders and links no templates, so no 1Password is needed |
 | `SECRETS_PACKAGE` | `private` | name of the generated package |
 | `PACKAGES_DIR` | `packages` | |
 | `TEMPLATES_DIR` | `templates` | |
@@ -163,6 +164,9 @@ case "$HOST" in
   *) TEMPLATES+=(.s3cfg) ;;   # a secret that stays off the work machine
 esac
 ```
+
+An empty `TEMPLATES` means all of them. To render none on a host, such as a
+server with no 1Password session, set `SECRETS=0` there instead.
 
 Templates can interpolate `$hostname` (short hostname, for per-machine
 secrets), `$DOTFILES_HOST` (the same value) and `$OP_VAULT`, so one template
